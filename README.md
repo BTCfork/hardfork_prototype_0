@@ -102,6 +102,7 @@ BTCfork community
 
 - Primary Website: https://bitcoinforks.org/
 - Slack: https://btcforks.signup.team/
+- Telegram: https://telegram.me/BTCFork
 - Reddit: https://www.reddit.com/r/btcfork/
 - GitHub: https://github.com/BTCfork
 - ConsiderIt (issue voting): https://btcforks.consider.it/
