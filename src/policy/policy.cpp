@@ -58,10 +58,12 @@ bool IsStandard(const CScript& scriptPubKey, txnouttype& whichType)
 
 bool IsStandardTx(const CTransaction& tx, std::string& reason)
 {
-    if (tx.nVersion > CTransaction::CURRENT_VERSION || tx.nVersion < 1) {
+    // HFP0 CRY begin: merge 4fea8e741ba38b2c1c4fb1c79962234f711c846e
+    if (tx.nVersion > CTransaction::MAX_STANDARD_VERSION || tx.nVersion < 1) {
         reason = "version";
         return false;
     }
+    // HFP0 CRY end
 
     // Extremely large transactions with lots of inputs can cost the network
     // almost as much to process as they cost the sender in fees, because

@@ -25,6 +25,7 @@
 #include "script/script.h"
 #include "script/sigcache.h"
 #include "script/standard.h"
+#include "thinblock.h"             // HFP0 XTB added
 #include "tinyformat.h"
 #include "txdb.h"
 #include "txmempool.h"
@@ -34,9 +35,14 @@
 #include "utilmoneystr.h"
 #include "utilstrencodings.h"
 #include "validationinterface.h"
+#include "blocksizecalculator.h"   // HFP0 BSZ added
+// HFP0 XTB begin
+// This is here because many files include util, so hopefully it will minimize diffs
+#include "xthinblocks.h"
+// HFP0 XTB end
 
 #include <sstream>
-
+//#include <algorithm>               // HFP0 XTB added
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/atomic.hpp>
 #include <boost/filesystem.hpp>
@@ -53,6 +59,21 @@ using namespace std;
 /**
  * Global state
  */
+
+// HFP0 BSZ begin
+// Bitpay's adaptive patch made these global variables, but they were duplicated in modules
+// which imported them from consensus.h, leading to inconsistent global state.
+// Now they are declared as "extern" in headers and only defined here.
+/** The maximum allowed size for a serialized block, in bytes (network rule) */
+unsigned int maxBlockSize = OLD_MAX_BLOCK_SIZE;
+/** The maximum allowed number of signature check operations in a block (network rule) */
+unsigned int maxBlockSigops = maxBlockSize / BLOCK_TO_SIGOPS_DIVISOR;
+/** The maximum number of sigops we're willing to relay/mine in a single tx */
+unsigned int maxStandardTxSigops = maxBlockSigops / SIGOPS_TO_STANDARD_TX_DIVISOR;
+/** The number of blocks to look back for median block size computation.
+    Made into variable so it can be overridden by unit tests. */
+unsigned int median_block_lookback = NUM_BLOCKS_FOR_MEDIAN_BLOCK;
+// HFP0 BSZ end
 
 CCriticalSection cs_main;
 
@@ -343,7 +364,7 @@ void FinalizeNode(NodeId nodeid) {
         nQueuedValidatedHeaders -= entry.fValidatedHeaders;
         mapBlocksInFlight.erase(entry.hash);
     }
-    EraseOrphansFor(nodeid);
+    // HFP0 XTB merge: removed call to EraseOrphansFor()
     nPreferredDownload -= state->fPreferredDownload;
 
     mapNodeState.erase(nodeid);
@@ -354,6 +375,11 @@ void FinalizeNode(NodeId nodeid) {
 bool MarkBlockAsReceived(const uint256& hash) {
     map<uint256, pair<NodeId, list<QueuedBlock>::iterator> >::iterator itInFlight = mapBlocksInFlight.find(hash);
     if (itInFlight != mapBlocksInFlight.end()) {
+        // HFP0 XTB begin
+        int64_t getdataTime = itInFlight->second.second->nTime;
+        int64_t now = GetTimeMicros();
+        LogPrint("thin", "Received block %s in %.2f seconds\n", hash.ToString(), (now - getdataTime) / 1000000.0);
+        // HFP0 XTB end
         CNodeState *state = State(itInFlight->second.first);
         nQueuedValidatedHeaders -= itInFlight->second.second->fValidatedHeaders;
         state->nBlocksInFlightValidHeaders -= itInFlight->second.second->fValidatedHeaders;
@@ -679,9 +705,12 @@ bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
         return true;
     if ((int64_t)tx.nLockTime < ((int64_t)tx.nLockTime < LOCKTIME_THRESHOLD ? (int64_t)nBlockHeight : nBlockTime))
         return true;
-    BOOST_FOREACH(const CTxIn& txin, tx.vin)
-        if (!txin.IsFinal())
+    // HFP0 RLT (BIP68) begin
+    BOOST_FOREACH(const CTxIn& txin, tx.vin) {
+        if (!(txin.nSequence == CTxIn::SEQUENCE_FINAL))
             return false;
+    }
+    // HFP0 RLT (BIP68) end
     return true;
 }
 
@@ -716,6 +745,179 @@ bool CheckFinalTx(const CTransaction &tx, int flags)
 
     return IsFinalTx(tx, nBlockHeight, nBlockTime);
 }
+
+// HFP0 RLT (BIP68) begin
+/**
+ * Calculates the block height and previous block's median time past at
+ * which the transaction will be considered final in the context of BIP 68.
+ * Also removes from the vector of input heights any entries which did not
+ * correspond to sequence locked inputs as they do not affect the calculation.
+ */
+static std::pair<int, int64_t> CalculateSequenceLocks(const CTransaction &tx, int flags, std::vector<int>* prevHeights, const CBlockIndex& block)
+{
+    assert(prevHeights->size() == tx.vin.size());
+
+    // Will be set to the equivalent height- and time-based nLockTime
+    // values that would be necessary to satisfy all relative lock-
+    // time constraints given our view of block chain history.
+    // The semantics of nLockTime are the last invalid height/time, so
+    // use -1 to have the effect of any height or time being valid.
+    int nMinHeight = -1;
+    int64_t nMinTime = -1;
+
+    // tx.nVersion is signed integer so requires cast to unsigned otherwise
+    // we would be doing a signed comparison and half the range of nVersion
+    // wouldn't support BIP 68.
+    bool fEnforceBIP68 = static_cast<uint32_t>(tx.nVersion) >= 2
+                      && flags & LOCKTIME_VERIFY_SEQUENCE;
+
+    // Do not enforce sequence numbers as a relative lock time
+    // unless we have been instructed to
+    if (!fEnforceBIP68) {
+        return std::make_pair(nMinHeight, nMinTime);
+    }
+
+    for (size_t txinIndex = 0; txinIndex < tx.vin.size(); txinIndex++) {
+        const CTxIn& txin = tx.vin[txinIndex];
+
+        // Sequence numbers with the most significant bit set are not
+        // treated as relative lock-times, nor are they given any
+        // consensus-enforced meaning at this point.
+        if (txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_DISABLE_FLAG) {
+            // The height of this input is not relevant for sequence locks
+            (*prevHeights)[txinIndex] = 0;
+            continue;
+        }
+
+        int nCoinHeight = (*prevHeights)[txinIndex];
+
+        if (txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG) {
+            int64_t nCoinTime = block.GetAncestor(std::max(nCoinHeight-1, 0))->GetMedianTimePast();
+            // NOTE: Subtract 1 to maintain nLockTime semantics
+            // BIP 68 relative lock times have the semantics of calculating
+            // the first block or time at which the transaction would be
+            // valid. When calculating the effective block time or height
+            // for the entire transaction, we switch to using the
+            // semantics of nLockTime which is the last invalid block
+            // time or height.  Thus we subtract 1 from the calculated
+            // time or height.
+
+            // Time-based relative lock-times are measured from the
+            // smallest allowed timestamp of the block containing the
+            // txout being spent, which is the median time past of the
+            // block prior.
+            nMinTime = std::max(nMinTime, nCoinTime + (int64_t)((txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_MASK) << CTxIn::SEQUENCE_LOCKTIME_GRANULARITY) - 1);
+        } else {
+            nMinHeight = std::max(nMinHeight, nCoinHeight + (int)(txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_MASK) - 1);
+        }
+    }
+
+    return std::make_pair(nMinHeight, nMinTime);
+}
+
+static bool EvaluateSequenceLocks(const CBlockIndex& block, std::pair<int, int64_t> lockPair)
+{
+    assert(block.pprev);
+    int64_t nBlockTime = block.pprev->GetMedianTimePast();
+    if (lockPair.first >= block.nHeight || lockPair.second >= nBlockTime)
+        return false;
+
+    return true;
+}
+
+bool SequenceLocks(const CTransaction &tx, int flags, std::vector<int>* prevHeights, const CBlockIndex& block)
+{
+    return EvaluateSequenceLocks(block, CalculateSequenceLocks(tx, flags, prevHeights, block));
+}
+
+bool TestLockPointValidity(const LockPoints* lp)
+{
+    AssertLockHeld(cs_main);
+    assert(lp);
+    // If there are relative lock times then the maxInputBlock will be set
+    // If there are no relative lock times, the LockPoints don't depend on the chain
+    if (lp->maxInputBlock) {
+        // Check whether chainActive is an extension of the block at which the LockPoints
+        // calculation was valid.  If not LockPoints are no longer valid
+        if (!chainActive.Contains(lp->maxInputBlock)) {
+            return false;
+        }
+    }
+
+    // LockPoints still valid
+    return true;
+}
+
+bool CheckSequenceLocks(const CTransaction &tx, int flags, LockPoints* lp, bool useExistingLockPoints)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(mempool.cs);
+
+    CBlockIndex* tip = chainActive.Tip();
+    CBlockIndex index;
+    index.pprev = tip;
+    // CheckSequenceLocks() uses chainActive.Height()+1 to evaluate
+    // height based locks because when SequenceLocks() is called within
+    // ConnectBlock(), the height of the block *being*
+    // evaluated is what is used.
+    // Thus if we want to know if a transaction can be part of the
+    // *next* block, we need to use one more than chainActive.Height()
+    index.nHeight = tip->nHeight + 1;
+
+    std::pair<int, int64_t> lockPair;
+    if (useExistingLockPoints) {
+        assert(lp);
+        lockPair.first = lp->height;
+        lockPair.second = lp->time;
+    }
+    else {
+        // pcoinsTip contains the UTXO set for chainActive.Tip()
+        CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+        std::vector<int> prevheights;
+        prevheights.resize(tx.vin.size());
+        for (size_t txinIndex = 0; txinIndex < tx.vin.size(); txinIndex++) {
+            const CTxIn& txin = tx.vin[txinIndex];
+            CCoins coins;
+            if (!viewMemPool.GetCoins(txin.prevout.hash, coins)) {
+                return error("%s: Missing input", __func__);
+            }
+            if (coins.nHeight == MEMPOOL_HEIGHT) {
+                // Assume all mempool transaction confirm in the next block
+                prevheights[txinIndex] = tip->nHeight + 1;
+            } else {
+                prevheights[txinIndex] = coins.nHeight;
+            }
+        }
+        lockPair = CalculateSequenceLocks(tx, flags, &prevheights, index);
+        if (lp) {
+            lp->height = lockPair.first;
+            lp->time = lockPair.second;
+            // Also store the hash of the block with the highest height of
+            // all the blocks which have sequence locked prevouts.
+            // This hash needs to still be on the chain
+            // for these LockPoint calculations to be valid
+            // Note: It is impossible to correctly calculate a maxInputBlock
+            // if any of the sequence locked inputs depend on unconfirmed txs,
+            // except in the special case where the relative lock time/height
+            // is 0, which is equivalent to no sequence lock. Since we assume
+            // input height of tip+1 for mempool txs and test the resulting
+            // lockPair from CalculateSequenceLocks against tip+1.  We know
+            // EvaluateSequenceLocks will fail if there was a non-zero sequence
+            // lock on a mempool input, so we can use the return value of
+            // CheckSequenceLocks to indicate the LockPoints validity
+            int maxInputHeight = 0;
+            BOOST_FOREACH(int height, prevheights) {
+                // Can ignore mempool inputs since we'll fail if they had non-zero locks
+                if (height != tip->nHeight+1) {
+                    maxInputHeight = std::max(maxInputHeight, height);
+                }
+            }
+            lp->maxInputBlock = tip->GetAncestor(maxInputHeight);
+        }
+    }
+    return EvaluateSequenceLocks(index, lockPair);
+}
+// HFP0 RLT (BIP68) end
 
 unsigned int GetLegacySigOpCount(const CTransaction& tx)
 {
@@ -756,46 +958,102 @@ unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& in
 bool CheckTransaction(const CTransaction& tx, CValidationState &state)
 {
     // Basic checks that don't depend on any context
-    if (tx.vin.empty())
+    if (tx.vin.empty()) {
+#if HFP0_DEBUG_BSZ
+        // HFP0 DBG begin
+        LogPrintf("HFP0 BSZ: CheckTransaction: vin empty\n");
+        // HFP0 DBG end
+#endif
         return state.DoS(10, false, REJECT_INVALID, "bad-txns-vin-empty");
-    if (tx.vout.empty())
+    }
+    if (tx.vout.empty()) {
+#if HFP0_DEBUG_BSZ
+        // HFP0 DBG begin
+        LogPrintf("HFP0 BSZ: CheckTransaction: vout empty\n");
+        // HFP0 DBG end
+#endif
         return state.DoS(10, false, REJECT_INVALID, "bad-txns-vout-empty");
+    }
     // Size limits
-    if (::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION) > MAX_BLOCK_SIZE)
+    // HFP0 BSZ begin: replace MAX_BLOCK_SIZE
+    if (::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION) > maxBlockSize) {
+#if HFP0_DEBUG_BSZ
+        // HFP0 DBG begin
+        LogPrintf("HFP0 BSZ: CheckTransaction: oversize\n");
+        // HFP0 DBG end
+#endif
         return state.DoS(100, false, REJECT_INVALID, "bad-txns-oversize");
+    }
+    // HFP0 BSZ end
 
     // Check for negative or overflow output values
     CAmount nValueOut = 0;
     BOOST_FOREACH(const CTxOut& txout, tx.vout)
     {
-        if (txout.nValue < 0)
+        if (txout.nValue < 0) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: CheckTransaction: vout negative\n");
+            // HFP0 DBG end
+#endif
             return state.DoS(100, false, REJECT_INVALID, "bad-txns-vout-negative");
-        if (txout.nValue > MAX_MONEY)
+        }
+        if (txout.nValue > MAX_MONEY) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: CheckTransaction: vout too large\n");
+            // HFP0 DBG end
+#endif
             return state.DoS(100, false, REJECT_INVALID, "bad-txns-vout-toolarge");
+        }
         nValueOut += txout.nValue;
-        if (!MoneyRange(nValueOut))
+        if (!MoneyRange(nValueOut)) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: CheckTransaction: txouttotal too large\n");
+            // HFP0 DBG end
+#endif
             return state.DoS(100, false, REJECT_INVALID, "bad-txns-txouttotal-toolarge");
+        }
     }
 
     // Check for duplicate inputs
     set<COutPoint> vInOutPoints;
     BOOST_FOREACH(const CTxIn& txin, tx.vin)
     {
-        if (vInOutPoints.count(txin.prevout))
+        if (vInOutPoints.count(txin.prevout)) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: CheckTransaction: inputs duplicate\n");
+            // HFP0 DBG end
+#endif
             return state.DoS(100, false, REJECT_INVALID, "bad-txns-inputs-duplicate");
+        }
         vInOutPoints.insert(txin.prevout);
     }
 
     if (tx.IsCoinBase())
     {
-        if (tx.vin[0].scriptSig.size() < 2 || tx.vin[0].scriptSig.size() > 100)
+        if (tx.vin[0].scriptSig.size() < 2 || tx.vin[0].scriptSig.size() > 100) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: CheckTransaction: bad cb length\n");
+            // HFP0 DBG end
+#endif
             return state.DoS(100, false, REJECT_INVALID, "bad-cb-length");
+        }
     }
     else
     {
         BOOST_FOREACH(const CTxIn& txin, tx.vin)
-            if (txin.prevout.IsNull())
+            if (txin.prevout.IsNull()) {
+#if HFP0_DEBUG_BSZ
+                // HFP0 DBG begin
+                LogPrintf("HFP0 BSZ: CheckTransaction: txs prevout null\n");
+                // HFP0 DBG end
+#endif
                 return state.DoS(10, false, REJECT_INVALID, "bad-txns-prevout-null");
+            }
     }
 
     return true;
@@ -829,28 +1087,58 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
     if (pfMissingInputs)
         *pfMissingInputs = false;
 
-    if (!CheckTransaction(tx, state))
+    if (!CheckTransaction(tx, state)) {
+#if HFP0_DEBUG_BSZ
+        // HFP0 DBG begin
+        LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: CheckTransaction failed\n");
+        // HFP0 DBG end
+#endif
         return false;
+    }
 
     // Coinbase is only valid in a block, not as a loose transaction
-    if (tx.IsCoinBase())
+    if (tx.IsCoinBase()) {
+#if HFP0_DEBUG_BSZ
+        // HFP0 DBG begin
+        LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: IsCoinBase failed\n");
+        // HFP0 DBG end
+#endif
         return state.DoS(100, false, REJECT_INVALID, "coinbase");
+    }
 
     // Rather not work on nonstandard transactions (unless -testnet/-regtest)
     string reason;
-    if (fRequireStandard && !IsStandardTx(tx, reason))
+    if (fRequireStandard && !IsStandardTx(tx, reason)) {
+#if HFP0_DEBUG_BSZ
+        // HFP0 DBG begin
+        LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: non-standard tx and not on testnet/regtest\n");
+        // HFP0 DBG end
+#endif
         return state.DoS(0, false, REJECT_NONSTANDARD, reason);
+    }
 
     // Only accept nLockTime-using transactions that can be mined in the next
     // block; we don't want our mempool filled up with transactions that can't
     // be mined yet.
-    if (!CheckFinalTx(tx, STANDARD_LOCKTIME_VERIFY_FLAGS))
+    if (!CheckFinalTx(tx, STANDARD_LOCKTIME_VERIFY_FLAGS)) {
+#if HFP0_DEBUG_BSZ
+        // HFP0 DBG begin
+        LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: non-final\n");
+        // HFP0 DBG end
+#endif
         return state.DoS(0, false, REJECT_NONSTANDARD, "non-final");
+    }
 
     // is it already in the memory pool?
     uint256 hash = tx.GetHash();
-    if (pool.exists(hash))
+    if (pool.exists(hash)) {
+#if HFP0_DEBUG_BSZ
+        // HFP0 DBG begin
+        LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: already in mempool\n");
+        // HFP0 DBG end
+#endif
         return state.Invalid(false, REJECT_ALREADY_KNOWN, "txn-already-in-mempool");
+    }
 
     // Check for conflicts with in-memory transactions
     set<uint256> setConflicts;
@@ -887,8 +1175,14 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
                         }
                     }
                 }
-                if (fReplacementOptOut)
+                if (fReplacementOptOut) {
+#if HFP0_DEBUG_BSZ
+                    // HFP0 DBG begin
+                    LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: mempool conflict\n");
+                    // HFP0 DBG end
+#endif
                     return state.Invalid(false, REJECT_CONFLICT, "txn-mempool-conflict");
+                }
 
                 setConflicts.insert(ptxConflicting->GetHash());
             }
@@ -901,6 +1195,7 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
         CCoinsViewCache view(&dummy);
 
         CAmount nValueIn = 0;
+        LockPoints lp;        // HFP0 CSV (BIP112) added
         {
         LOCK(pool.cs);
         CCoinsViewMemPool viewMemPool(pcoinsTip, pool);
@@ -911,6 +1206,11 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
         if (view.HaveCoins(hash)) {
             if (!fHadTxInCache)
                 vHashTxnToUncache.push_back(hash);
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: already have it\n");
+            // HFP0 DBG end
+#endif
             return state.Invalid(false, REJECT_ALREADY_KNOWN, "txn-already-known");
         }
 
@@ -923,13 +1223,24 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
             if (!view.HaveCoins(txin.prevout.hash)) {
                 if (pfMissingInputs)
                     *pfMissingInputs = true;
+#if HFP0_DEBUG_BSZ
+                // HFP0 DBG begin
+                LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: not all inputs exist\n");
+                // HFP0 DBG end
+#endif
                 return false; // fMissingInputs and !state.IsInvalid() is used to detect this condition, don't set state.Invalid()
             }
         }
 
         // are the actual inputs available?
-        if (!view.HaveInputs(tx))
+        if (!view.HaveInputs(tx)) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: tx inputs spent\n");
+            // HFP0 DBG end
+#endif
             return state.Invalid(false, REJECT_DUPLICATE, "bad-txns-inputs-spent");
+        }
 
         // Bring the best block into scope
         view.GetBestBlock();
@@ -938,11 +1249,27 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
 
         // we have all inputs cached now, so switch back to dummy, so we don't need to keep lock on mempool
         view.SetBackend(dummy);
+
+        // HFP0 RLT (BIP68) begin
+        // Only accept BIP68 sequence locked transactions that can be mined in the next
+        // block; we don't want our mempool filled up with transactions that can't
+        // be mined yet.
+        // Must keep pool.cs for this unless we change CheckSequenceLocks to take a
+        // CoinsViewCache instead of create its own
+        if (!CheckSequenceLocks(tx, STANDARD_LOCKTIME_VERIFY_FLAGS, &lp))
+            return state.DoS(0, false, REJECT_NONSTANDARD, "non-BIP68-final");
+        // HFP0 RLT (BIP68) end
         }
 
         // Check for non-standard pay-to-script-hash in inputs
-        if (fRequireStandard && !AreInputsStandard(tx, view))
+        if (fRequireStandard && !AreInputsStandard(tx, view)) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: nonstandard inputs\n");
+            // HFP0 DBG end
+#endif
             return state.Invalid(false, REJECT_NONSTANDARD, "bad-txns-nonstandard-inputs");
+        }
 
         unsigned int nSigOps = GetLegacySigOpCount(tx);
         nSigOps += GetP2SHSigOpCount(tx, view);
@@ -968,7 +1295,9 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
             }
         }
 
-        CTxMemPoolEntry entry(tx, nFees, GetTime(), dPriority, chainActive.Height(), pool.HasNoInputsOf(tx), inChainInputValue, fSpendsCoinbase, nSigOps);
+        // HFP0 CSV (BIP112) begin: added lp argument
+        CTxMemPoolEntry entry(tx, nFees, GetTime(), dPriority, chainActive.Height(), pool.HasNoInputsOf(tx), inChainInputValue, fSpendsCoinbase, nSigOps, lp);
+        // HFP0 CSV (BIP112) end
         unsigned int nSize = entry.GetTxSize();
 
         // Check that the transaction doesn't have an excessive number of
@@ -976,15 +1305,33 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
         // itself can contain sigops MAX_STANDARD_TX_SIGOPS is less than
         // MAX_BLOCK_SIGOPS; we still consider this an invalid rather than
         // merely non-standard transaction.
-        if ((nSigOps > MAX_STANDARD_TX_SIGOPS) || (nBytesPerSigOp && nSigOps > nSize / nBytesPerSigOp))
+        // HFP0 BSZ begin: replace MAX_STANDARD_TX_SIGOPS
+        if ((nSigOps > maxStandardTxSigops) || (nBytesPerSigOp && nSigOps > nSize / nBytesPerSigOp)) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: too many nSigOps = %d, maxStandardTxSigops = %u, nSize = %s / nBytesPerSigOp (%d)\n", nSigOps, maxStandardTxSigops, nSize, nBytesPerSigOp);
+            // HFP0 DBG end
+#endif
             return state.DoS(0, false, REJECT_NONSTANDARD, "bad-txns-too-many-sigops", false,
                 strprintf("%d", nSigOps));
+        }
+        // HFP0 BSZ end
 
         CAmount mempoolRejectFee = pool.GetMinFee(GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000).GetFee(nSize);
         if (mempoolRejectFee > 0 && nModifiedFees < mempoolRejectFee) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: mempool min fee not met\n");
+            // HFP0 DBG end
+#endif
             return state.DoS(0, false, REJECT_INSUFFICIENTFEE, "mempool min fee not met", false, strprintf("%d < %d", nFees, mempoolRejectFee));
         } else if (GetBoolArg("-relaypriority", DEFAULT_RELAYPRIORITY) && nModifiedFees < ::minRelayTxFee.GetFee(nSize) && !AllowFree(entry.GetPriority(chainActive.Height() + 1))) {
             // Require that free transactions have sufficient priority to be mined in the next block.
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: insufficient priority\n");
+            // HFP0 DBG end
+#endif
             return state.DoS(0, false, REJECT_INSUFFICIENTFEE, "insufficient priority");
         }
 
@@ -1011,10 +1358,16 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
             dFreeCount += nSize;
         }
 
-        if (fRejectAbsurdFee && nFees > ::minRelayTxFee.GetFee(nSize) * 10000)
+        if (fRejectAbsurdFee && nFees > ::minRelayTxFee.GetFee(nSize) * 10000) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: absurdly high fee\n");
+            // HFP0 DBG end
+#endif
             return state.Invalid(false,
                 REJECT_HIGHFEE, "absurdly-high-fee",
                 strprintf("%d > %d", nFees, ::minRelayTxFee.GetFee(nSize) * 10000));
+        }
 
         // Calculate in-mempool ancestors, up to a limit.
         CTxMemPool::setEntries setAncestors;
@@ -1024,6 +1377,11 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
         size_t nLimitDescendantSize = GetArg("-limitdescendantsize", DEFAULT_DESCENDANT_SIZE_LIMIT)*1000;
         std::string errString;
         if (!pool.CalculateMemPoolAncestors(entry, setAncestors, nLimitAncestors, nLimitAncestorSize, nLimitDescendants, nLimitDescendantSize, errString)) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: too long mempool chain\n");
+            // HFP0 DBG end
+#endif
             return state.DoS(0, false, REJECT_NONSTANDARD, "too-long-mempool-chain", false, errString);
         }
 
@@ -1036,6 +1394,11 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
             const uint256 &hashAncestor = ancestorIt->GetTx().GetHash();
             if (setConflicts.count(hashAncestor))
             {
+#if HFP0_DEBUG_BSZ
+                // HFP0 DBG begin
+                LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: spends conflicting tx\n");
+                // HFP0 DBG end
+#endif
                 return state.DoS(10, error("AcceptToMemoryPool: %s spends conflicting transaction %s",
                                            hash.ToString(),
                                            hashAncestor.ToString()),
@@ -1076,6 +1439,11 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
                 // that we don't spend too much time walking descendants.
                 // This should be rare.
                 if (mi->IsDirty()) {
+#if HFP0_DEBUG_BSZ
+                    // HFP0 DBG begin
+                    LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: too many potential replacements\n");
+                    // HFP0 DBG end
+#endif
                     return state.DoS(0,
                             error("AcceptToMemoryPool: rejecting replacement %s; cannot replace tx %s with untracked descendants",
                                 hash.ToString(),
@@ -1102,6 +1470,11 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
                 CFeeRate oldFeeRate(mi->GetModifiedFee(), mi->GetTxSize());
                 if (newFeeRate <= oldFeeRate)
                 {
+#if HFP0_DEBUG_BSZ
+                    // HFP0 DBG begin
+                    LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: insufficient fee\n");
+                    // HFP0 DBG end
+#endif
                     return state.DoS(0,
                             error("AcceptToMemoryPool: rejecting replacement %s; new feerate %s <= old feerate %s",
                                   hash.ToString(),
@@ -1131,6 +1504,11 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
                     nConflictingSize += it->GetTxSize();
                 }
             } else {
+#if HFP0_DEBUG_BSZ
+                // HFP0 DBG begin
+                LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: too many potential replacements again\n");
+                // HFP0 DBG end
+#endif
                 return state.DoS(0,
                         error("AcceptToMemoryPool: rejecting replacement %s; too many potential replacements (%d > %d)\n",
                             hash.ToString(),
@@ -1150,10 +1528,16 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
                     // Rather than check the UTXO set - potentially expensive -
                     // it's cheaper to just check if the new input refers to a
                     // tx that's in the mempool.
-                    if (pool.mapTx.find(tx.vin[j].prevout.hash) != pool.mapTx.end())
+                    if (pool.mapTx.find(tx.vin[j].prevout.hash) != pool.mapTx.end()) {
+#if HFP0_DEBUG_BSZ
+                        // HFP0 DBG begin
+                        LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: replacement adds unconfirmed\n");
+                        // HFP0 DBG end
+#endif
                         return state.DoS(0, error("AcceptToMemoryPool: replacement %s adds unconfirmed input, idx %d",
                                                   hash.ToString(), j),
                                          REJECT_NONSTANDARD, "replacement-adds-unconfirmed");
+                    }
                 }
             }
 
@@ -1162,6 +1546,11 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
             // transactions would not be paid for.
             if (nModifiedFees < nConflictingFees)
             {
+#if HFP0_DEBUG_BSZ
+                // HFP0 DBG begin
+                LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: insufficient fee again\n");
+                // HFP0 DBG end
+#endif
                 return state.DoS(0, error("AcceptToMemoryPool: rejecting replacement %s, less fees than conflicting txs; %s < %s",
                                           hash.ToString(), FormatMoney(nModifiedFees), FormatMoney(nConflictingFees)),
                                  REJECT_INSUFFICIENTFEE, "insufficient fee");
@@ -1172,6 +1561,11 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
             CAmount nDeltaFees = nModifiedFees - nConflictingFees;
             if (nDeltaFees < ::minRelayTxFee.GetFee(nSize))
             {
+#if HFP0_DEBUG_BSZ
+                // HFP0 DBG begin
+                LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: insufficient fee once more\n");
+                // HFP0 DBG end
+#endif
                 return state.DoS(0,
                         error("AcceptToMemoryPool: rejecting replacement %s, not enough additional fees to relay; %s < %s",
                               hash.ToString(),
@@ -1183,15 +1577,26 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
 
         // Check against previous transactions
         // This is done last to help prevent CPU exhaustion denial-of-service attacks.
-        ValidationCostTracker costTracker(MAX_BLOCK_SIGOPS, MAX_BLOCK_SIGHASH);
+        // HFP0 BSZ TODO: renamed MAX_BLOCK_SIGOPS to OLD_MAX_BLOCK_SIGOPS here, but should it be using this value? Possible bug.
+        ValidationCostTracker costTracker(OLD_MAX_BLOCK_SIGOPS, MAX_BLOCK_SIGHASH);
         if (!CheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS, true, &costTracker))
         {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: CheckInputs failed\n");
+            // HFP0 DBG end
+#endif
             return false;
         }
         // Reject transactions with very high signature-hash cost:
         uint64_t sighash_limit = (uint64_t)nSize * MAX_BLOCK_SIGHASH / MAX_BLOCK_SIZE;
         if (costTracker.GetSighashBytes() > sighash_limit)
         {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: too many sighash\n");
+            // HFP0 DBG end
+#endif
             return state.DoS(0,
                              error("AcceptToMemoryPool: too much signature hashing %s: %d > %d",
                                    hash.ToString(), costTracker.GetSighashBytes(), sighash_limit),
@@ -1211,6 +1616,11 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
         // can be exploited as a DoS attack.
         if (!CheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS, true, NULL))
         {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: bug - ConnectInputs failed against MANDATORY\n");
+            // HFP0 DBG end
+#endif
             return error("%s: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s, %s",
                 __func__, hash.ToString(), FormatStateMessage(state));
         }
@@ -1232,8 +1642,14 @@ bool AcceptToMemoryPoolWorker(CTxMemPool& pool, CValidationState &state, const C
         // trim mempool and check if tx was trimmed
         if (!fOverrideMempoolLimit) {
             LimitMempoolSize(pool, GetArg("-maxmempool", DEFAULT_MAX_MEMPOOL_SIZE) * 1000000, GetArg("-mempoolexpiry", DEFAULT_MEMPOOL_EXPIRY) * 60 * 60);
-            if (!pool.exists(hash))
+            if (!pool.exists(hash)) {
+#if HFP0_DEBUG_BSZ
+                // HFP0 DBG begin
+                LogPrintf("HFP0 BSZ: AcceptToMemoryPoolWorker: mempool full\n");
+                // HFP0 DBG end
+#endif
                 return state.DoS(0, false, REJECT_INSUFFICIENTFEE, "mempool full");
+            }
         }
     }
 
@@ -1364,8 +1780,15 @@ bool ReadBlockFromDisk(CBlock& block, const CDiskBlockPos& pos, const Consensus:
     }
 
     // Check the header
-    if (!CheckProofOfWork(block.GetHash(), block.nBits, consensusParams))
+    // HFP0 FRK, DIF begin
+    // if block version determines it's a fork block, use the post-fork POW limit
+    uint256 activePowLimit = Params().GetConsensus().powLimitHistoric;
+    if ((block.nVersion & FULL_FORK_VERSION_MAX) >= FULL_FORK_VERSION_MIN) {
+        activePowLimit = Params().GetConsensus().powLimitResetAtFork;
+    }
+    if (!CheckProofOfWork(block.GetHash(), block.nBits, activePowLimit))
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
+    // HFP0 FRK, DIF end
 
     return true;
 }
@@ -1542,6 +1965,11 @@ void static InvalidBlockFound(CBlockIndex *pindex, const CValidationState &state
         pindex->nStatus |= BLOCK_FAILED_VALID;
         setDirtyBlockIndex.insert(pindex);
         setBlockIndexCandidates.erase(pindex);
+#if HFP0_DEBUG_FRK
+        // HFP0 DBG begin
+        LogPrintf("HFP0 FRK: calling InvalidChainFound() from ActivateBestChainSetup\n");
+        // HFP0 DBG end
+#endif
         InvalidChainFound(pindex);
     }
 }
@@ -1927,6 +2355,7 @@ void ThreadScriptCheck() {
 // we're being fed a bad chain (blocks being generated much
 // too slowly or too quickly).
 //
+// HFP0 FRK TODO: check if we need to adapt it for forking conditions
 void PartitionCheck(bool (*initialDownloadCheck)(), CCriticalSection& cs, const CBlockIndex *const &bestHeader,
                     int64_t nPowTargetSpacing)
 {
@@ -1993,21 +2422,28 @@ static int64_t nTimeIndex = 0;
 static int64_t nTimeCallbacks = 0;
 static int64_t nTimeTotal = 0;
 
-static bool DidBlockTriggerSizeFork(const CBlock &block, const CBlockIndex *pindex, const CChainParams &chainparams)
+// HFP0 FRK begin
+static bool DidBlockTriggerHFP0SizeFork(const CBlock &block, const CBlockIndex *pindex, const CChainParams &chainparams)
 {
-    if (pblocktree->ForkBitActivated(FORK_BIT_2MB) != uint256())
-        return false; // Already active
-    if (block.nTime > chainparams.GetConsensus().SizeForkExpiration()) {
-        // 2MB vote failed: this code is obsolete
-        strMiscWarning = _("Warning: This version is obsolete; upgrade required!");
-        CAlert::Notify(strMiscWarning, true);
-        uiInterface.NotifyAlertChanged(uint256(), CT_NEW);
-        return false;
+    if (pindex->nHeight >= chainparams.GetConsensus().nHFP0ActivateSizeForkHeight) {
+        // 2MB voting bit should be turned off
+        assert((block.nVersion & FORK_BIT_2MB) != FORK_BIT_2MB);
+        return true;
     }
-    if ((block.nVersion & FORK_BIT_2MB) != FORK_BIT_2MB)
-        return false;
-    return IsSuperMajority(FORK_BIT_2MB, pindex, chainparams.GetConsensus().ActivateSizeForkMajority(), chainparams.GetConsensus(), true /* use bitmask */);
+    return false;
 }
+// HFP0 FRK end
+
+// HFP0 removed obsolete DidBlockTrigger*Fork functions
+
+// HFP0 BSZ added: function to update the global variables dependent on adaptive block size change
+void UpdateAdaptiveBlockSizeVars(CBlockIndex* pindexPrev)
+{
+    maxBlockSize = BlockSizeCalculator::ComputeBlockSize(pindexPrev, median_block_lookback);
+    maxBlockSigops = maxBlockSize / BLOCK_TO_SIGOPS_DIVISOR;
+    maxStandardTxSigops = maxBlockSigops / SIGOPS_TO_STANDARD_TX_DIVISOR;
+}
+// HFP0 BSZ end
 
 bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pindex, CCoinsViewCache& view, bool fJustCheck)
 {
@@ -2097,6 +2533,19 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         flags |= SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
     }
 
+    // HFP0 FRK, BSZ begin: activate adaptive block size (BSZ) after fork trigger
+    if (pindex->nHeight+1 >= chainparams.GetConsensus().nHFP0ActivateSizeForkHeight) {
+        UpdateAdaptiveBlockSizeVars(pindex->pprev);
+#if HFP0_DEBUG_BSZ
+        // HFP0 DBG begin
+        LogPrintf("HFP0 BSZ: ConnectBlock: maxBlockSize = ComputeBlockSize() = %u\n", maxBlockSize);
+        LogPrintf("HFP0 BSZ: ConnectBlock: maxBlockSigops = %u at address %p\n", maxBlockSigops, &maxBlockSigops);
+        LogPrintf("HFP0 BSZ: ConnectBlock: maxStandardTxSigops = %u\n", maxStandardTxSigops);
+        // HFP0 DBG end
+#endif
+    }
+    // HFP0 FRK, BSZ end
+
     int64_t nTime2 = GetTimeMicros(); nTimeForks += nTime2 - nTime1;
     LogPrint("bench", "    - Fork checks: %.2fms [%.2fs]\n", 0.001 * (nTime2 - nTime1), nTimeForks * 0.000001);
 
@@ -2104,27 +2553,39 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     // Pre-fork, legacy sigop counting is used, unlimited resource tracker
     // Post-fork, accurately counted sigop/sighash limits are used
-    ValidationCostTracker costTracker(MaxBlockSigops(block.nTime), MaxBlockSighash(block.nTime));
+    // HFP0 BSZ begin: change to using block height
+    ValidationCostTracker costTracker(MaxBlockSigops(pindex->nHeight), MaxBlockSighash(pindex->nHeight));
+    // HFP0 BSZ end
 
     CCheckQueueControl<CScriptCheck> control(fScriptChecks && nScriptCheckThreads ? &scriptcheckqueue : NULL);
 
+    // HFP0 RLT (BIP68) begin
+    std::vector<int> prevheights;
+    int nLockTimeFlags = 0;
+    // HFP0 RLT (BIP68) end
     CAmount nFees = 0;
     int nInputs = 0;
     uint32_t nSigOps = 0;
-    uint32_t nMaxLegacySigops = MaxLegacySigops(block.nTime);
+    // HFP0 BSZ, CLN removed: nMaxLegacySigops is replaced by BSZ's maxBlockSigops
     CDiskTxPos pos(pindex->GetBlockPos(), GetSizeOfCompactSize(block.vtx.size()));
     std::vector<std::pair<uint256, CDiskTxPos> > vPos;
     vPos.reserve(block.vtx.size());
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
+    // HFP0 XTB begin
+    int nChecked = 0;
+    int nOrphansChecked = 0;
+    // HFP0 XTB end
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
         const CTransaction &tx = block.vtx[i];
 
         nInputs += tx.vin.size();
         nSigOps += GetLegacySigOpCount(tx);
-        if (nSigOps > nMaxLegacySigops)
+        // HFP0 BSZ begin: replace nMaxLegacySigops by maxBlockSigops
+        if (nSigOps > maxBlockSigops)
             return state.DoS(100, error("ConnectBlock(): too many sigops"),
                              REJECT_INVALID, "bad-blk-sigops");
+        // HFP0 BSZ end
 
         if (!tx.IsCoinBase())
         {
@@ -2132,25 +2593,59 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
                 return state.DoS(100, error("ConnectBlock(): inputs missing/spent"),
                                  REJECT_INVALID, "bad-txns-inputs-missingorspent");
 
+            // HFP0 RLT (BIP68) begin
+            // Check that transaction is BIP68 final
+            // BIP68 lock checks (as opposed to nLockTime checks) must
+            // be in ConnectBlock because they require the UTXO set
+            prevheights.resize(tx.vin.size());
+            for (size_t j = 0; j < tx.vin.size(); j++) {
+                prevheights[j] = view.AccessCoins(tx.vin[j].prevout.hash)->nHeight;
+            }
+
+            if (!SequenceLocks(tx, nLockTimeFlags, &prevheights, *pindex)) {
+                return state.DoS(100, error("ConnectBlock(): contains a non-BIP68-final transaction", __func__),
+                                 REJECT_INVALID, "bad-txns-nonfinal");
+            }
+            // HFP0 RLT (BIP68) end
+
             if (fStrictPayToScriptHash)
             {
                 // Add in sigops done by pay-to-script-hash inputs;
                 // this is to prevent a "rogue miner" from creating
                 // an incredibly-expensive-to-validate block.
                 nSigOps += GetP2SHSigOpCount(tx, view);
-                if (nSigOps > nMaxLegacySigops)
+                // HFP0 BSZ begin: replace nMaxLegacySigops by maxBlockSigops
+                if (nSigOps > maxBlockSigops)
                     return state.DoS(100, error("ConnectBlock(): too many sigops"),
                                      REJECT_INVALID, "bad-blk-sigops");
+                // HFP0 BSZ end
             }
 
             nFees += view.GetValueIn(tx)-tx.GetValueOut();
 
             std::vector<CScriptCheck> vChecks;
             bool fCacheResults = fJustCheck; /* Don't cache results if we're actually connecting blocks (still consult the cache, though) */
-            if (!CheckInputs(tx, state, view, fScriptChecks, flags, fCacheResults,
-                        &costTracker, nScriptCheckThreads ? &vChecks : NULL))
-                return error("ConnectBlock(): CheckInputs on %s failed with %s",
-                    tx.GetHash().ToString(), FormatStateMessage(state));
+            // HFP0 XTB begin
+            // HFP0 XTB, CLN removed: multiple lines of code commented out in XTB
+
+            // Only check inputs when the tx hash in not in the setPreVerifiedTxHash as would only
+            // happen if this were a regular block or when a tx is found w?ithin the returning XThinblock.
+            uint256 hash = tx.GetHash();
+            bool inOrphanCache = setUnVerifiedOrphanTxHash.count(hash);
+            if ((inOrphanCache) || (!setPreVerifiedTxHash.count(hash) && !inOrphanCache)) {
+                nChecked++;
+                if (inOrphanCache)
+                    nOrphansChecked++;
+                if (!CheckInputs(tx, state, view, fScriptChecks, flags, fCacheResults,
+                            &costTracker, nScriptCheckThreads ? &vChecks : NULL))
+                    return error("ConnectBlock(): CheckInputs on %s failed with %s",
+                        tx.GetHash().ToString(), FormatStateMessage(state));
+            }
+            else {
+                setPreVerifiedTxHash.erase(hash);
+                setUnVerifiedOrphanTxHash.erase(hash);
+            }
+            // HFP0 XTB end
             control.Add(vChecks);
         }
 
@@ -2163,6 +2658,10 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         vPos.push_back(std::make_pair(tx.GetHash(), pos));
         pos.nTxOffset += ::GetSerializeSize(tx, SER_DISK, CLIENT_VERSION);
     }
+    // HFP0 XTB begin
+    LogPrint("thin", "Number of CheckInputs() performed: %d  Orphan count: %d\n", nChecked, nOrphansChecked);
+    // HFP0 XTB end
+
     int64_t nTime3 = GetTimeMicros(); nTimeConnect += nTime3 - nTime2;
     LogPrint("bench", "      - Connect %u transactions: %.2fms (%.3fms/tx, %.3fms/txin) [%.2fs]\n", (unsigned)block.vtx.size(), 0.001 * (nTime3 - nTime2), 0.001 * (nTime3 - nTime2) / block.vtx.size(), nInputs <= 1 ? 0 : 0.001 * (nTime3 - nTime2) / (nInputs-1), nTimeConnect * 0.000001);
 
@@ -2218,13 +2717,17 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
     int64_t nTime6 = GetTimeMicros(); nTimeCallbacks += nTime6 - nTime5;
     LogPrint("bench", "    - Callbacks: %.2fms [%.2fs]\n", 0.001 * (nTime6 - nTime5), nTimeCallbacks * 0.000001);
 
-    if (DidBlockTriggerSizeFork(block, pindex, chainparams)) {
-        uint32_t tAllowBigger = block.nTime + chainparams.GetConsensus().SizeForkGracePeriod();
-        LogPrintf("%s: Max block size fork activating at time %d, bigger blocks allowed at time %d\n",
-                  __func__, block.nTime, tAllowBigger);
-        pblocktree->ActivateForkBit(FORK_BIT_2MB, pindex->GetBlockHash());
-        sizeForkTime.store(tAllowBigger);
+    // HFP0 FRK, CLN begin - only evaluate HFP0 trigger, drop Classic counting
+    if (DidBlockTriggerHFP0SizeFork(block, pindex, chainparams)) {
+        // Block triggered fork. For now, we just log the event.
+#if HFP0_DEBUG_FRK
+        // HFP0 DBG begin
+        LogPrintf("%s: HFP0 FRK: size fork active at height %d and time %d\n",
+                  __func__, pindex->nHeight, block.nTime);
+        // HFP0 DBG end
+#endif
     }
+    // HFP0 FRK, CLN end
 
     return true;
 }
@@ -2372,24 +2875,26 @@ void static UpdateTip(CBlockIndex *pindexNew) {
     {
         int nUpgraded = 0;
         const CBlockIndex* pindex = chainActive.Tip();
-        int32_t voteBits = FORK_BIT_2MB;
-
-        for (int i = 0; i < 100 && pindex != NULL; i++)
-        {
-            if (!CBlock::VersionKnown(pindex->nVersion, voteBits))
-                ++nUpgraded;
-            pindex = pindex->pprev;
+        // HFP0 FRK, CLN begin removed Classic upgrade check,
+        // report instead if HFP0 hard fork is active
+        if (pindex->nHeight + 1 >= chainParams.GetConsensus().nHFP0ActivateSizeForkHeight) {
+            // HFP0 FRK, BSZ begin: we're forked - update adaptive block size (BSZ)
+#if HFP0_DEBUG_FRK
+            // HFP0 DBG begin
+            LogPrintf("%s: HFP0 FRK: tip updated - height determines hard fork is active\n", __func__);
+            // HFP0 DBG end
+#endif
+            UpdateAdaptiveBlockSizeVars(pindex->pprev);
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: %s: maxBlockSize = ComputeBlockSize() = %u\n", __func__, maxBlockSize);
+            LogPrintf("HFP0 BSZ: %s: maxBlockSigops = %u at address %p\n", __func__, maxBlockSigops, &maxBlockSigops);
+            LogPrintf("HFP0 BSZ: %s: maxStandardTxSigops = %u\n", __func__, maxStandardTxSigops);
+            // HFP0 DBG end
+#endif
+            // HFP0 FRK, BSZ end
         }
-        if (nUpgraded > 0)
-            LogPrintf("%s: %d of last 100 blocks unknown version\n", __func__, nUpgraded);
-        if (nUpgraded > 100/2)
-        {
-            // strMiscWarning is read by GetWarnings(), called by Qt and the JSON-RPC code to warn the user:
-            strMiscWarning = _("Warning: This version is obsolete; upgrade required!");
-            CAlert::Notify(strMiscWarning, true);
-            uiInterface.NotifyAlertChanged(uint256(), CT_NEW);
-            fWarned = true;
-        }
+        // HFP0 FRK, CLN end
     }
 }
 
@@ -2480,8 +2985,14 @@ bool static ConnectTip(CValidationState& state, const CChainParams& chainparams,
         bool rv = ConnectBlock(*pblock, state, pindexNew, view);
         GetMainSignals().BlockChecked(*pblock, state);
         if (!rv) {
-            if (state.IsInvalid())
+            if (state.IsInvalid()) {
+#if HFP0_DEBUG_FRK
+                // HFP0 DBG begin
+                LogPrintf("net", "HFP0 FRK: calling InvalidBlockFound from ConnectTip\n");
+                // HFP0 DBG end
+#endif
                 InvalidBlockFound(pindexNew, state);
+            }
             return error("ConnectTip(): ConnectBlock %s failed", pindexNew->GetBlockHash().ToString());
         }
         mapBlockSource.erase(pindexNew->GetBlockHash());
@@ -2628,8 +3139,14 @@ static bool ActivateBestChainStep(CValidationState& state, const CChainParams& c
             if (!ConnectTip(state, chainparams, pindexConnect, pindexConnect == pindexMostWork ? pblock : NULL)) {
                 if (state.IsInvalid()) {
                     // The block violates a consensus rule.
-                    if (!state.CorruptionPossible())
+                    if (!state.CorruptionPossible()) {
+#if HFP0_DEBUG_FRK
+                        // HFP0 DBG begin
+                        LogPrintf("HFP0 FRK: calling InvalidChainFound() from ActivateBestChainSetup\n");
+                        // HFP0 DBG end
+#endif
                         InvalidChainFound(vpindexToConnect.back());
+                    }
                     state = CValidationState();
                     fInvalidFound = true;
                     fContinue = false;
@@ -2777,7 +3294,11 @@ bool InvalidateBlock(CValidationState& state, const Consensus::Params& consensus
         }
         it++;
     }
-
+#if HFP0_DEBUG_FRK
+    // HFP0 DBG begin
+    LogPrintf("HFP0 FRK: calling InvalidChainFound() from InvalidateBlock\n");
+    // HFP0 DBG end
+#endif
     InvalidChainFound(pindex);
     mempool.removeForReorg(pcoinsTip, chainActive.Tip()->nHeight + 1, STANDARD_LOCKTIME_VERIFY_FLAGS);
     return true;
@@ -2986,10 +3507,20 @@ bool FindUndoPos(CValidationState &state, int nFile, CDiskBlockPos &pos, unsigne
 
 bool CheckBlockHeader(const CBlockHeader& block, CValidationState& state, bool fCheckPOW)
 {
+    // HFP0 FRK, DIF begin
+    // HFP0 TODO: refactor: this is used in ReadBlockFromDisk too
+    uint256 activePowLimit = Params().GetConsensus().powLimitHistoric;
+    if ((block.nVersion & FULL_FORK_VERSION_MAX) >= FULL_FORK_VERSION_MIN) {
+        activePowLimit = Params().GetConsensus().powLimitResetAtFork;
+    }
+    // HFP0 FRK, DIF end
+
     // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus()))
+    // HFP0 FRK, DIF begin
+    if (fCheckPOW && !CheckProofOfWork(block.GetHash(), block.nBits, activePowLimit))
         return state.DoS(50, error("CheckBlockHeader(): proof of work failed"),
                          REJECT_INVALID, "high-hash");
+    // HFP0 FRK, DIF end
 
     // Check timestamp
     if (block.GetBlockTime() > GetAdjustedTime() + 2 * 60 * 60)
@@ -3028,11 +3559,34 @@ bool CheckBlock(const CBlock& block, CValidationState& state, bool fCheckPOW, bo
     }
 
     // Size limits
-    unsigned int nSizeLimit = MaxBlockSize(block.nTime);
+    // HFP0 BSZ begin
+    // HFP0 FRK, BSZ begin: update adaptive block size (BSZ) after fork trigger
+    if (chainActive.Height() >= Params().GetConsensus().nHFP0ActivateSizeForkHeight) {
+        UpdateAdaptiveBlockSizeVars(chainActive.Tip());
+#if HFP0_DEBUG_BSZ
+        // HFP0 DBG begin
+        LogPrintf("HFP0 BSZ: CheckBlock: maxBlockSize = ComputeBlockSize() = %u\n", maxBlockSize);
+        LogPrintf("HFP0 BSZ: CheckBlock: maxBlockSigops = %u\n", maxBlockSigops);
+        LogPrintf("HFP0 BSZ: CheckBlock: maxStandardTxSigops = %u\n", maxStandardTxSigops);
+        // HFP0 DBG end
+#endif
+    }
+    // HFP0 FRK, BSZ end
 
-    if (block.vtx.empty() || block.vtx.size() > nSizeLimit || ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) > nSizeLimit)
+    unsigned int nSizeLimit = MaxBlockSize(chainActive.Height());
+    unsigned int nSigopLimit = maxBlockSigops;
+
+    // HFP0 BSZ TODO: check whether nSizeLimit is still needed
+    if (block.vtx.empty() || block.vtx.size() > nSizeLimit || ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION) > nSizeLimit) {
+#if HFP0_DEBUG_BSZ
+        // HFP0 DBG begin
+        LogPrintf("HFP0 BSZ: CheckBlock: size limits failed (%u > %u) || (%u > %u) at height %u\n", block.vtx.size(), nSizeLimit, ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION), nSizeLimit, chainActive.Height());
+        // HFP0 DBG end
+#endif
         return state.DoS(100, error("CheckBlock(): size limits failed"),
                          REJECT_INVALID, "bad-blk-length");
+    }
+    // HFP0 BSZ end
 
     // All potential-corruption validation must be done before we do any
     // transaction validation, as otherwise we may mark the header as invalid
@@ -3059,7 +3613,7 @@ bool CheckBlock(const CBlock& block, CValidationState& state, bool fCheckPOW, bo
     {
         nSigOps += GetLegacySigOpCount(tx);
     }
-    if (nSigOps > MaxLegacySigops(block.nTime))
+    if (nSigOps > nSigopLimit)
         return state.DoS(100, error("CheckBlock(): out-of-bounds SigOpCount"),
                          REJECT_INVALID, "bad-blk-sigops");
 
@@ -3087,6 +3641,18 @@ bool ContextualCheckBlockHeader(const CBlockHeader& block, CValidationState& sta
 {
     const Consensus::Params& consensusParams = Params().GetConsensus();
     // Check proof of work
+
+    // HFP0 FRK begin
+    if (pindexPrev->nHeight + 1 >= consensusParams.nHFP0ActivateSizeForkHeight) {
+        // after fork, accept only forked versions, and kick out whoever serves us a non-forked block
+        if ((uint32_t)block.nVersion < (BASE_VERSION + FULL_FORK_VERSION_MIN) || (uint32_t)block.nVersion > (BASE_VERSION + FULL_FORK_VERSION_MAX))
+            // HFP0 DBG begin: modify existing trace - that's why no ifdef
+            return state.DoS(100, error("%s: rejected non-fork nVersion block (%lu)", __func__, (uint32_t)block.nVersion),
+                                 REJECT_INVALID, "bad-version");
+            // HFP0 DBG end
+    }
+    // HFP0 FRK end
+
     if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.DoS(100, error("%s: incorrect proof of work", __func__),
                          REJECT_INVALID, "bad-diffbits");
@@ -3503,14 +4069,7 @@ bool static LoadBlockIndexDB()
     if (!pblocktree->LoadBlockIndexGuts())
         return false;
 
-    // If the max-block-size fork threshold was reached, update
-    // chainparams so big blocks are allowed:
-    uint256 sizeForkHash = pblocktree->ForkBitActivated(FORK_BIT_2MB);
-    if (sizeForkHash != uint256()) {
-        BlockMap::iterator it = mapBlockIndex.find(sizeForkHash);
-        assert(it != mapBlockIndex.end());
-        sizeForkTime.store(it->second->GetBlockTime() + chainparams.GetConsensus().SizeForkGracePeriod());
-    }
+    // HFP0 CLN removed Classic fork check
 
     boost::this_thread::interruption_point();
 
@@ -3743,7 +4302,7 @@ bool LoadBlockIndex()
     return true;
 }
 
-bool InitBlockIndex(const CChainParams& chainparams) 
+bool InitBlockIndex(const CChainParams& chainparams)
 {
     LOCK(cs_main);
 
@@ -3795,7 +4354,10 @@ bool LoadExternalBlockFile(const CChainParams& chainparams, FILE* fileIn, CDiskB
     int nLoaded = 0;
     try {
         // This takes over fileIn and calls fclose() on it in the CBufferedFile destructor
-        CBufferedFile blkdat(fileIn, 2*MAX_BLOCK_SIZE, MAX_BLOCK_SIZE+8, SER_DISK, CLIENT_VERSION);
+        // HFP0 BSZ begin: replace MAX_BLOCK_SIZE by computed blocksize
+        unsigned int blocksize = maxBlockSize;
+        CBufferedFile blkdat(fileIn, 2*blocksize, blocksize+8, SER_DISK, CLIENT_VERSION);
+        // HFP0 BSZ end
         uint64_t nRewind = blkdat.GetPos();
         while (!blkdat.eof()) {
             boost::this_thread::interruption_point();
@@ -3814,8 +4376,10 @@ bool LoadExternalBlockFile(const CChainParams& chainparams, FILE* fileIn, CDiskB
                     continue;
                 // read size
                 blkdat >> nSize;
-                if (nSize < 80 || nSize > MAX_BLOCK_SIZE)
+                // HFP0 BSZ begin: replace MAX_BLOCK_SIZE by blocksize
+                if (nSize < 80 || nSize > blocksize)
                     continue;
+                // HFP0 BSZ end
             } catch (const std::exception&) {
                 // no valid block header found; don't complain
                 break;
@@ -4196,8 +4760,11 @@ void static ProcessGetData(CNode* pfrom, const Consensus::Params& consensusParam
             boost::this_thread::interruption_point();
             it++;
 
-            if (inv.type == MSG_BLOCK || inv.type == MSG_FILTERED_BLOCK)
+            // HFP0 XTB begin
+            if (inv.type == MSG_BLOCK || inv.type == MSG_FILTERED_BLOCK
+                    || inv.type == MSG_THINBLOCK || inv.type == MSG_XTHINBLOCK)
             {
+            // HFP0 XTB end
                 bool send = false;
                 BlockMap::iterator mi = mapBlockIndex.find(inv.hash);
                 if (mi != mapBlockIndex.end())
@@ -4238,6 +4805,10 @@ void static ProcessGetData(CNode* pfrom, const Consensus::Params& consensusParam
                         assert(!"cannot load block from disk");
                     if (inv.type == MSG_BLOCK)
                         pfrom->PushMessage(NetMsgType::BLOCK, block);
+                    // HFP0 XTB begin
+                    else if (inv.type == MSG_THINBLOCK || inv.type == MSG_XTHINBLOCK)
+                        SendXThinBlock(block, pfrom, inv);
+                    // HFP0 XTB end
                     else // MSG_FILTERED_BLOCK)
                     {
                         LOCK(pfrom->cs_filter);
@@ -4281,7 +4852,7 @@ void static ProcessGetData(CNode* pfrom, const Consensus::Params& consensusParam
                     map<CInv, CDataStream>::iterator mi = mapRelay.find(inv);
                     if (mi != mapRelay.end()) {
                         pfrom->PushMessage(inv.GetCommand(), (*mi).second);
-                        pushed = true;
+                        // HFP0 XTB removed:   pushed = true;
                     }
                 }
                 if (!pushed && inv.type == MSG_TX) {
@@ -4302,8 +4873,11 @@ void static ProcessGetData(CNode* pfrom, const Consensus::Params& consensusParam
             // Track requests for our stuff.
             GetMainSignals().Inventory(inv.hash);
 
-            if (inv.type == MSG_BLOCK || inv.type == MSG_FILTERED_BLOCK)
+            // HFP0 XTB begin
+            if (inv.type == MSG_BLOCK || inv.type == MSG_FILTERED_BLOCK
+                    || inv.type == MSG_THINBLOCK || inv.type == MSG_XTHINBLOCK)
                 break;
+            // HFP0 XTB end
         }
     }
 
@@ -4332,21 +4906,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         return true;
     }
 
-
-    if (!(nLocalServices & NODE_BLOOM) &&
-              (strCommand == NetMsgType::FILTERLOAD ||
-               strCommand == NetMsgType::FILTERADD ||
-               strCommand == NetMsgType::FILTERCLEAR))
-    {
-        if (pfrom->nVersion >= NO_BLOOM_VERSION) {
-            Misbehaving(pfrom->GetId(), 100);
-            return false;
-        } else if (GetBoolArg("-enforcenodebloom", false)) {
-            pfrom->fDisconnect = true;
-            return false;
-        }
-    }
-
+    // HFP0 XTB removed if() code section
 
     if (strCommand == NetMsgType::VERSION)
     {
@@ -4363,6 +4923,14 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         CAddress addrFrom;
         uint64_t nNonce = 1;
         vRecv >> pfrom->nVersion >> pfrom->nServices >> nTime >> addrMe;
+        // HFP0 XTB begin
+        CheckNodeSupportForThinBlocks(); // BUIP010 Xtreme Thinblocks
+        // HFP0 XTB end
+
+        // HFP0: currently, after the fork has triggered we use the ban system to get rid of
+        //     unwanted peers based on unsuitable block versions
+        // HFP0 FRK,PER TODO: separate more cleanly / quickly.
+        //     Also: replay attack prevention (tx signature change) required.
         if (pfrom->nVersion < MIN_PEER_PROTO_VERSION)
         {
             // disconnect from peers older than this proto version
@@ -4494,7 +5062,11 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             // We send this to non-NODE NETWORK peers as well, because even
             // non-NODE NETWORK peers can announce blocks (such as pruning
             // nodes)
-            pfrom->PushMessage(NetMsgType::SENDHEADERS);
+            // HFP0 XTB begin
+            // BUIP010 Extreme Thinblocks: We only do inv/getdata for xthinblocks and so we must have headersfirst turned off
+            if (!IsThinBlocksEnabled())
+                pfrom->PushMessage(NetMsgType::SENDHEADERS);
+            // HFP0 XTB end
         }
     }
 
@@ -4568,7 +5140,13 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
     else if (strCommand == NetMsgType::SENDHEADERS)
     {
         LOCK(cs_main);
-        State(pfrom->GetId())->fPreferHeaders = true;
+        // HFP0 XTB begin
+        // BUIP010 Xtreme Thinblocks: We only do inv/getdata for xthinblocks and so we must have headersfirst turned off
+        if (IsThinBlocksEnabled())
+            State(pfrom->GetId())->fPreferHeaders = false;
+        else
+            State(pfrom->GetId())->fPreferHeaders = true;
+        // HFP0 XTB end
     }
 
 
@@ -4617,10 +5195,54 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
                     CNodeState *nodestate = State(pfrom->GetId());
                     if (CanDirectFetch(chainparams.GetConsensus()) &&
                         nodestate->nBlocksInFlight < MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
-                        vToFetch.push_back(inv);
-                        // Mark block as in flight already, even though the actual "getdata" message only goes out
-                        // later (within the same cs_main lock, though).
-                        MarkBlockAsInFlight(pfrom->GetId(), inv.hash, chainparams.GetConsensus());
+                        // HFP0 XTB begin
+                        CInv inv2(inv);
+                        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+                        CBloomFilter filterMemPool;
+                        if (IsThinBlocksEnabled() && IsChainNearlySyncd()) {
+                            if (HaveConnectThinblockNodes() || (HaveThinblockNodes() && CheckThinblockTimer(inv.hash))) {
+                                // Must download a block from a ThinBlock peer
+                                if (pfrom->mapThinBlocksInFlight.size() < 1 && pfrom->ThinBlockCapable()) { // We can only send one thinblock per peer at a time
+                                    pfrom->mapThinBlocksInFlight[inv2.hash] = GetTime();
+                                    inv2.type = MSG_XTHINBLOCK;
+                                    std::vector<uint256> vOrphanHashes;
+                                    for (map<uint256, COrphanTx>::iterator mi = mapOrphanTransactions.begin(); mi != mapOrphanTransactions.end(); ++mi)
+                                        vOrphanHashes.push_back((*mi).first);
+                                    BuildSeededBloomFilter(filterMemPool, vOrphanHashes);
+                                    ss << inv2;
+                                    ss << filterMemPool;
+                                    pfrom->PushMessage(NetMsgType::GET_XTHIN, ss);
+                                    MarkBlockAsInFlight(pfrom->GetId(), inv.hash, chainparams.GetConsensus());
+                                    LogPrint("thin", "Requesting Thinblock %s from peer %s (%d)\n", inv2.hash.ToString(), pfrom->addrName.c_str(),pfrom->id);
+                                }
+                            }
+                            else {
+                                // Try to download a thinblock if possible otherwise just download a regular block
+                                if (pfrom->mapThinBlocksInFlight.size() < 1 && pfrom->ThinBlockCapable()) { // We can only send one thinblock per peer at a time
+                                    pfrom->mapThinBlocksInFlight[inv2.hash] = GetTime();
+                                    inv2.type = MSG_XTHINBLOCK;
+                                    std::vector<uint256> vOrphanHashes;
+                                    for (map<uint256, COrphanTx>::iterator mi = mapOrphanTransactions.begin(); mi != mapOrphanTransactions.end(); ++mi)
+                                        vOrphanHashes.push_back((*mi).first);
+                                    BuildSeededBloomFilter(filterMemPool, vOrphanHashes);
+                                    ss << inv2;
+                                    ss << filterMemPool;
+                                    pfrom->PushMessage(NetMsgType::GET_XTHIN, ss);
+                                    LogPrint("thin", "Requesting Thinblock %s from peer %s (%d)\n", inv2.hash.ToString(), pfrom->addrName.c_str(),pfrom->id);
+                                }
+                                else {
+                                    LogPrint("thin", "Requesting Regular Block %s from peer %s (%d)\n", inv2.hash.ToString(), pfrom->addrName.c_str(),pfrom->id);
+                                    vToFetch.push_back(inv2);
+                                }
+                                MarkBlockAsInFlight(pfrom->GetId(), inv.hash, chainparams.GetConsensus());
+                            }
+                        }
+                        else {
+                            vToFetch.push_back(inv2);
+                            MarkBlockAsInFlight(pfrom->GetId(), inv.hash, chainparams.GetConsensus());
+                            LogPrint("thin", "Requesting Regular Block %s from peer %s (%d)\n", inv2.hash.ToString(), pfrom->addrName.c_str(),pfrom->id);
+                        }
+                        // HFP0 XTB end
                     }
                     LogPrint("net", "getheaders (%d) %s to peer=%d\n", pindexBestHeader->nHeight, inv.hash.ToString(), pfrom->id);
                 }
@@ -4974,7 +5596,9 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
                 LogPrint("net", "Large reorg, won't direct fetch to %s (%d)\n",
                         pindexLast->GetBlockHash().ToString(),
                         pindexLast->nHeight);
-            } else {
+            // HFP0 XTB begin
+            } else if (!IsThinBlocksEnabled()) {
+            // HFP0 XTB end
                 vector<CInv> vGetData;
                 // Download as much as possible, from earliest to latest.
                 BOOST_REVERSE_FOREACH(CBlockIndex *pindex, vToFetch) {
@@ -5000,6 +5624,357 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         CheckBlockIndex(chainparams.GetConsensus());
     }
 
+    // HFP0 XTB begin
+    else if (strCommand == NetMsgType::GET_XTHIN && !fImporting && !fReindex) // Ignore blocks received while importing
+    {
+        CBloomFilter filterMemPool;
+        CInv inv;
+        vRecv >> inv >> filterMemPool;
+
+        LoadFilter(pfrom, &filterMemPool);
+        pfrom->vRecvGetData.insert(pfrom->vRecvGetData.end(), inv);
+        ProcessGetData(pfrom, chainparams.GetConsensus());
+    }
+    else if (strCommand == NetMsgType::XTHINBLOCK  && !fImporting && !fReindex) // Ignore blocks received while importing
+    {
+        CXThinBlock thinBlock;
+        vRecv >> thinBlock;
+
+        CInv inv(MSG_BLOCK, thinBlock.header.GetHash());
+        int nSizeThinBlock = ::GetSerializeSize(thinBlock, SER_NETWORK, PROTOCOL_VERSION);
+        LogPrint("thin", "Received thinblock %s from peer %s (%d). Size %d bytes.\n", inv.hash.ToString(), pfrom->addrName.c_str(),pfrom->id, nSizeThinBlock);
+        if (!pfrom->mapThinBlocksInFlight.count(inv.hash)) {
+            LogPrint("thin", "Thinblock received but not requested %s from peer %s (%d)\n",inv.hash.ToString(), pfrom->addrName.c_str(), pfrom->addrName.c_str(), pfrom->id);
+            Misbehaving(pfrom->GetId(), 20);
+        }
+
+        pfrom->nSizeThinBlock = nSizeThinBlock;
+        pfrom->thinBlock.SetNull();
+        pfrom->thinBlock.nVersion = thinBlock.header.nVersion;
+        pfrom->thinBlock.nBits = thinBlock.header.nBits;
+        pfrom->thinBlock.nNonce = thinBlock.header.nNonce;
+        pfrom->thinBlock.nTime = thinBlock.header.nTime;
+        pfrom->thinBlock.hashMerkleRoot = thinBlock.header.hashMerkleRoot;
+        pfrom->thinBlock.hashPrevBlock = thinBlock.header.hashPrevBlock;
+        pfrom->xThinBlockHashes = thinBlock.vTxHashes;
+
+        // Create the mapMissingTx from all the supplied tx's in the xthinblock
+        std::map<uint256, CTransaction> mapMissingTx;
+        BOOST_FOREACH(CTransaction tx, thinBlock.vMissingTx)
+            mapMissingTx[tx.GetHash()] = tx;
+
+        // Create a map of all 8 bytes tx hashes pointing to their full tx hash counterpart
+        // We need to check all transaction sources (orphan list, mempool, and new (incoming) transactions in this block) for a collision.
+        bool collision = false;
+        std::map<uint64_t, uint256> mapPartialTxHash;
+        LOCK(cs_main);
+        std::vector<uint256> memPoolHashes;
+        mempool.queryHashes(memPoolHashes);
+        for (uint64_t i = 0; i < memPoolHashes.size(); i++) {
+            uint64_t cheapHash = memPoolHashes[i].GetCheapHash();
+            if(mapPartialTxHash.count(cheapHash)) //Check for collisions
+                collision = true;
+            mapPartialTxHash[cheapHash] = memPoolHashes[i];
+        }
+        for (map<uint256, COrphanTx>::iterator mi = mapOrphanTransactions.begin(); mi != mapOrphanTransactions.end(); ++mi) {
+            uint64_t cheapHash = (*mi).first.GetCheapHash();
+            if(mapPartialTxHash.count(cheapHash)) //Check for collisions
+                collision = true;
+            mapPartialTxHash[cheapHash] = (*mi).first;
+        }
+        for (map<uint256, CTransaction>::iterator mi = mapMissingTx.begin(); mi != mapMissingTx.end(); ++mi) {
+            uint64_t cheapHash = (*mi).first.GetCheapHash();
+            // Check for cheap hash collision. Only mark as collision if the full hash is not the same,
+            // because the same tx could have been received into the mempool during the request of the xthinblock.
+            // In that case we would have the same transaction twice, so it is not a real cheap hash collision and we continue normally.
+            const uint256 existingHash = mapPartialTxHash[cheapHash];
+            if( (!existingHash.IsNull()) ) { // Check if we already have the cheap hash
+                if ((existingHash != (*mi).first)) { // Check if it really is a cheap hash collision and not just the same transaction
+                    collision = true;
+                }
+            }
+            mapPartialTxHash[cheapHash] = (*mi).first;
+        }
+
+        // There is a remote possiblity of a Tx hash collision therefore if it occurs we re-request a normal
+        // thinblock which has the full Tx hash data rather than just the truncated hash.
+        if (collision) {
+            vector<CInv> vGetData;
+            vGetData.push_back(CInv(MSG_THINBLOCK, thinBlock.header.GetHash()));
+            pfrom->PushMessage("getdata", vGetData);
+            LogPrintf("TX HASH COLLISION for xthinblock: re-requesting a thinblock\n");
+            return true;
+        }
+
+        int missingCount = 0;
+        int unnecessaryCount = 0;
+        // Xpress Validation - only perform xval if the chaintip matches the last blockhash in the thinblock
+        bool fXVal = (thinBlock.header.hashPrevBlock == chainActive.Tip()->GetBlockHash()) ? true : false;
+
+        // Look for each transaction in our various pools and buffers.
+        // With xThinBlocks the vTxHashes contains only the first 8 bytes of the tx hash.
+        BOOST_FOREACH(uint64_t &cheapHash, thinBlock.vTxHashes)
+        {
+            // Replace the truncated hash with the full hash value if it exists
+            const uint256 hash = mapPartialTxHash[cheapHash];
+            CTransaction tx;
+            if (!hash.IsNull())
+            {
+                bool inMemPool = mempool.lookup(hash, tx);
+                bool inMissingTx = mapMissingTx.count(hash) > 0;
+                bool inOrphanCache = mapOrphanTransactions.count(hash) > 0;
+
+                if ((inMemPool && inMissingTx) || (inOrphanCache && inMissingTx))
+                    unnecessaryCount++;
+
+                if (inOrphanCache) {
+                    tx = mapOrphanTransactions[hash].tx;
+                    setUnVerifiedOrphanTxHash.insert(hash);
+                }
+                else if (inMemPool && fXVal)
+                    setPreVerifiedTxHash.insert(hash);
+                else if (inMissingTx)
+                    tx = mapMissingTx[hash];
+            }
+            if (tx.IsNull())
+                missingCount++;
+            // This will push an empty/invalid transaction if we don't have it yet
+            pfrom->thinBlock.vtx.push_back(tx);
+        }
+        pfrom->thinBlockWaitingForTxns = missingCount;
+        LogPrint("thin", "thinblock waiting for: %d, unnecessary: %d, txs: %d full: %d\n", pfrom->thinBlockWaitingForTxns, unnecessaryCount, pfrom->thinBlock.vtx.size(), mapMissingTx.size());
+
+        if (pfrom->thinBlockWaitingForTxns == 0) {
+            // We have all the transactions now that are in this block: try to reassemble and process.
+            pfrom->thinBlockWaitingForTxns = -1;
+            pfrom->AddInventoryKnown(inv);
+            int blockSize = pfrom->thinBlock.GetSerializeSize(SER_NETWORK, CBlock::CURRENT_VERSION);
+            LogPrint("thin", "Reassembled thin block for %s (%d bytes). Message was %d bytes, compression ratio %3.2f\n",
+                     pfrom->thinBlock.GetHash().ToString(),
+                     blockSize,
+                     nSizeThinBlock,
+                     ((float) blockSize) / ((float) nSizeThinBlock)
+                     );
+
+            HandleBlockMessage(pfrom, strCommand, pfrom->thinBlock, inv);  // clears the thin block
+            BOOST_FOREACH(uint64_t &cheapHash, thinBlock.vTxHashes)
+                EraseOrphanTx(mapPartialTxHash[cheapHash]);
+        }
+        else if (pfrom->thinBlockWaitingForTxns > 0) {
+            // This marks the end of the transactions we've received. If we get this and we have NOT been able to
+            // finish reassembling the block, we need to re-request the transactions we're missing:
+            std::set<uint64_t> setHashesToRequest;
+            for (size_t i = 0; i < pfrom->thinBlock.vtx.size(); i++) {
+                 if (pfrom->thinBlock.vtx[i].IsNull()) {
+                     setHashesToRequest.insert(pfrom->xThinBlockHashes[i]);
+                     LogPrint("thin", "Re-requesting tx ==> 8 byte hash %d\n", pfrom->xThinBlockHashes[i]);
+                 }
+            }
+            // Re-request transactions that we are still missing
+            CXRequestThinBlockTx thinBlockTx(thinBlock.header.GetHash(), setHashesToRequest);
+            pfrom->PushMessage(NetMsgType::GET_XBLOCKTX, thinBlockTx);
+            LogPrint("thin", "Missing %d transactions for xthinblock, re-requesting\n",
+                      pfrom->thinBlockWaitingForTxns);
+        }
+    }
+
+    else if (strCommand == NetMsgType::THINBLOCK && !fImporting && !fReindex) // Ignore blocks received while importing
+    {
+        CThinBlock thinBlock;
+        vRecv >> thinBlock;
+
+        CInv inv(MSG_BLOCK, thinBlock.header.GetHash());
+        int nSizeThinBlock = ::GetSerializeSize(thinBlock, SER_NETWORK, PROTOCOL_VERSION);
+        LogPrint("thin", "received thinblock %s from peer %s (%d) of %d bytes\n", inv.hash.ToString(), pfrom->addrName.c_str(),pfrom->id, nSizeThinBlock);
+        if (!pfrom->mapThinBlocksInFlight.count(inv.hash)) {
+            LogPrint("thin", "Thinblock received but not requested %s  peer=%d\n",inv.hash.ToString(), pfrom->id);
+            LOCK(cs_main);
+            Misbehaving(pfrom->GetId(), 20);
+        }
+
+        pfrom->nSizeThinBlock = nSizeThinBlock;
+        pfrom->thinBlock.SetNull();
+        pfrom->thinBlock.nVersion = thinBlock.header.nVersion;
+        pfrom->thinBlock.nBits = thinBlock.header.nBits;
+        pfrom->thinBlock.nNonce = thinBlock.header.nNonce;
+        pfrom->thinBlock.nTime = thinBlock.header.nTime;
+        pfrom->thinBlock.hashMerkleRoot = thinBlock.header.hashMerkleRoot;
+        pfrom->thinBlock.hashPrevBlock = thinBlock.header.hashPrevBlock;
+        pfrom->thinBlockHashes = thinBlock.vTxHashes;
+
+        // Create the mapMissingTx from all the supplied tx's in the xthinblock
+        std::map<uint256, CTransaction> mapMissingTx;
+        BOOST_FOREACH(CTransaction tx, thinBlock.vMissingTx)
+            mapMissingTx[tx.GetHash()] = tx;
+
+        LOCK(cs_main);
+        int missingCount = 0;
+        int unnecessaryCount = 0;
+        // Xpress Validation - only perform xval if the chaintip matches the last blockhash in the thinblock
+        bool fXVal = (thinBlock.header.hashPrevBlock == chainActive.Tip()->GetBlockHash()) ? true : false;
+
+        // Look for each transaction in our various pools and buffers.
+        BOOST_FOREACH(const uint256 &hash, thinBlock.vTxHashes)
+        {
+            CTransaction tx;
+            if (!hash.IsNull())
+            {
+                bool inMemPool = mempool.lookup(hash, tx);
+                bool inMissingTx = mapMissingTx.count(hash) > 0;
+                bool inOrphanCache = mapOrphanTransactions.count(hash) > 0;
+
+                if ((inMemPool && inMissingTx) || (inOrphanCache && inMissingTx))
+                    unnecessaryCount++;
+
+                if (inOrphanCache) {
+                    tx = mapOrphanTransactions[hash].tx;
+                    setUnVerifiedOrphanTxHash.insert(hash);
+                }
+                else if (inMemPool && fXVal)
+                    setPreVerifiedTxHash.insert(hash);
+                else if (inMissingTx)
+                    tx = mapMissingTx[hash];
+            }
+            if (tx.IsNull())
+                missingCount++;
+            // This will push an empty/invalid transaction if we don't have it yet
+            pfrom->thinBlock.vtx.push_back(tx);
+        }
+        pfrom->thinBlockWaitingForTxns = missingCount;
+        LogPrint("thin", "thinblock waiting for: %d, unnecessary: %d, txs: %d full: %d\n", pfrom->thinBlockWaitingForTxns, unnecessaryCount, pfrom->thinBlock.vtx.size(), mapMissingTx.size());
+
+        if (pfrom->thinBlockWaitingForTxns == 0) {
+            // We have all the transactions now that are in this block: try to reassemble and process.
+            pfrom->thinBlockWaitingForTxns = -1;
+            pfrom->AddInventoryKnown(inv);
+            int blockSize = pfrom->thinBlock.GetSerializeSize(SER_NETWORK, CBlock::CURRENT_VERSION);
+            LogPrint("thin", "Reassembled thin block for %s (%d bytes). Message was %d bytes, compression ratio %3.2f\n",
+                     pfrom->thinBlock.GetHash().ToString(),
+                     blockSize,
+                     nSizeThinBlock,
+                     ((float) blockSize) / ((float) nSizeThinBlock)
+                     );
+
+            HandleBlockMessage(pfrom, strCommand, pfrom->thinBlock, inv);
+            BOOST_FOREACH(uint256 &hash, thinBlock.vTxHashes)
+                EraseOrphanTx(hash);
+        }
+        else if (pfrom->thinBlockWaitingForTxns > 0) {
+            // This marks the end of the transactions we've received. If we get this and we have NOT been able to
+            // finish reassembling the block, we need to re-request the full regular block:
+            vector<CInv> vGetData;
+            vGetData.push_back(CInv(MSG_BLOCK, thinBlock.header.GetHash()));
+            pfrom->PushMessage("getdata", vGetData);
+            setPreVerifiedTxHash.clear(); // Xpress Validation - clear the set since we do not do XVal on regular blocks
+            LogPrint("thin", "Missing %d Thinblock transactions, re-requesting a regular block\n",
+                       pfrom->thinBlockWaitingForTxns);
+        }
+    }
+
+
+    else if (strCommand == NetMsgType::XBLOCKTX && !fImporting && !fReindex) // handle Re-requested thinblock transactions
+    {
+        CXThinBlockTx thinBlockTx;
+        vRecv >> thinBlockTx;
+
+        CInv inv(MSG_XTHINBLOCK, thinBlockTx.blockhash);
+        LogPrint("net", "received blocktxs for %s peer=%d\n", inv.hash.ToString(), pfrom->id);
+        if (!pfrom->mapThinBlocksInFlight.count(inv.hash)) {
+            LogPrint("thin", "ThinblockTx received but not requested %s  peer=%d\n",inv.hash.ToString(), pfrom->id);
+            LOCK(cs_main);
+            Misbehaving(pfrom->GetId(), 20);
+        }
+
+        // Create the mapMissingTx from all the supplied tx's in the xthinblock
+        std::map<uint64_t, CTransaction> mapMissingTx;
+        BOOST_FOREACH(CTransaction tx, thinBlockTx.vMissingTx)
+            mapMissingTx[tx.GetHash().GetCheapHash()] = tx;
+
+        for (size_t i = 0; i < pfrom->thinBlock.vtx.size(); i++) {
+             if (pfrom->thinBlock.vtx[i].IsNull()) {
+                 pfrom->thinBlock.vtx[i] = mapMissingTx[pfrom->xThinBlockHashes[i]];
+                 pfrom->thinBlockWaitingForTxns--;
+                 LogPrint("thin", "Got Re-requested tx ==> 8 byte hash %d\n", pfrom->xThinBlockHashes[i]);
+             }
+        }
+        if (pfrom->thinBlockWaitingForTxns == 0) {
+            // We have all the transactions now that are in this block: try to reassemble and process.
+            pfrom->thinBlockWaitingForTxns = -1;
+            pfrom->AddInventoryKnown(inv);
+
+            // for compression statistics, we have to add up the size of xthinblock and the re-requested thinBlockTx.
+            int nSizeThinBlockTx = ::GetSerializeSize(thinBlockTx, SER_NETWORK, PROTOCOL_VERSION);
+            int blockSize = pfrom->thinBlock.GetSerializeSize(SER_NETWORK, CBlock::CURRENT_VERSION);
+            LogPrint("thin", "Reassembled thin block for %s (%d bytes). Message was %d bytes (thinblock) and %d bytes (re-requested tx), compression ratio %3.2f\n",
+                     pfrom->thinBlock.GetHash().ToString(),
+                     blockSize,
+                     pfrom->nSizeThinBlock,
+                     nSizeThinBlockTx,
+                     ((float) blockSize) / ( (float) pfrom->nSizeThinBlock + (float) nSizeThinBlockTx )
+                     );
+
+            std::vector<CTransaction> vTx = pfrom->thinBlock.vtx;
+            HandleBlockMessage(pfrom, strCommand, pfrom->thinBlock, inv);
+            for (unsigned int i = 0; i < vTx.size(); i++)
+                EraseOrphanTx(vTx[i].GetHash());
+        }
+        else {
+            LogPrint("thin", "Failed to retrieve all transactions for block - DOS Banned\n");
+            LOCK(cs_main);
+            Misbehaving(pfrom->GetId(), 100);
+        }
+    }
+
+
+    else if (strCommand == NetMsgType::GET_XBLOCKTX && !fImporting && !fReindex) // return Re-requested xthinblock transactions
+    {
+        CXRequestThinBlockTx thinRequestBlockTx;
+        vRecv >> thinRequestBlockTx;
+
+        // We use MSG_TX here even though we refer to blockhash because we need to track
+        // how many xblocktx requests we make in case of DOS
+        CInv inv(MSG_TX, thinRequestBlockTx.blockhash);
+        LogPrint("thin", "received get_xblocktx for %s peer=%d\n", inv.hash.ToString(), pfrom->id);
+
+        // Check for Misbehaving and DOS
+        // If they make more than 20 requests in 10 minutes then disconnect them
+        {
+            if (pfrom->nGetXBlockTxLastTime <= 0)
+                pfrom->nGetXBlockTxLastTime = GetTime();
+            uint64_t nNow = GetTime();
+            pfrom->nGetXBlockTxCount *= pow(1.0 - 1.0/600.0, (double)(nNow - pfrom->nGetXBlockTxLastTime));
+            pfrom->nGetXBlockTxLastTime = nNow;
+            pfrom->nGetXBlockTxCount += 1;
+            LogPrint("thin", "nGetXBlockTxCount is %f\n", pfrom->nGetXBlockTxCount);
+            if (pfrom->nGetXBlockTxCount >= 20) {
+                LogPrintf("DOS: Misbehaving - requesting too many xblocktx: %s\n", inv.hash.ToString());
+                LOCK(cs_main);
+                Misbehaving(pfrom->GetId(), 100);  // If they exceed the limit then disconnect them
+            }
+        }
+
+        {
+        LOCK(cs_main);
+        BlockMap::iterator mi = mapBlockIndex.find(inv.hash);
+        CBlock block;
+        const Consensus::Params& consensusParams = Params().GetConsensus();
+        if (!ReadBlockFromDisk(block, (*mi).second, consensusParams))
+            assert(!"cannot load block from disk");
+
+        std::vector<CTransaction> vTx;
+        for (unsigned int i = 0; i < block.vtx.size(); i++)
+        {
+            uint64_t cheapHash = block.vtx[i].GetHash().GetCheapHash();
+            if(thinRequestBlockTx.setCheapHashesToRequest.count(cheapHash))
+                vTx.push_back(block.vtx[i]);
+        }
+
+        pfrom->AddInventoryKnown(inv);
+        CXThinBlockTx thinBlockTx(thinRequestBlockTx.blockhash, vTx);
+        pfrom->PushMessage(NetMsgType::XBLOCKTX, thinBlockTx);
+        }
+    }
+    // HFP0 XTB end
     else if (strCommand == NetMsgType::BLOCK && !fImporting && !fReindex) // Ignore blocks received while importing
     {
         CBlock block;
@@ -5010,23 +5985,14 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
 
         pfrom->AddInventoryKnown(inv);
 
-        CValidationState state;
-        // Process all blocks from whitelisted peers, even if not requested,
-        // unless we're still syncing with the network.
-        // Such an unrequested block may still be processed, subject to the
-        // conditions in AcceptBlock().
-        bool forceProcessing = pfrom->fWhitelisted && !IsInitialBlockDownload();
-        ProcessNewBlock(state, chainparams, pfrom, &block, forceProcessing, NULL);
-        int nDoS;
-        if (state.IsInvalid(nDoS)) {
-            assert (state.GetRejectCode() < REJECT_INTERNAL); // Blocks are never rejected with internal reject codes
-            pfrom->PushMessage(NetMsgType::REJECT, strCommand, (unsigned char)state.GetRejectCode(),
-                               state.GetRejectReason().substr(0, MAX_REJECT_MESSAGE_LENGTH), inv.hash);
-            if (nDoS > 0) {
-                LOCK(cs_main);
-                Misbehaving(pfrom->GetId(), nDoS);
-            }
-        }
+        // HFP0 XTB removed code section
+
+        // HFP0 XTB begin
+        // BUIP010 Extreme Thinblocks: Handle Block Message
+        HandleBlockMessage(pfrom, strCommand, block, inv);
+        for (unsigned int i = 0; i < block.vtx.size(); i++)
+            EraseOrphanTx(block.vtx[i].GetHash());
+        // HFP0 XTB end
 
     }
 
@@ -5155,37 +6121,7 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
         }
     }
 
-
-    else if (fAlerts && strCommand == NetMsgType::ALERT)
-    {
-        CAlert alert;
-        vRecv >> alert;
-
-        uint256 alertHash = alert.GetHash();
-        if (pfrom->setKnown.count(alertHash) == 0)
-        {
-            if (alert.ProcessAlert(chainparams.AlertKey()))
-            {
-                // Relay
-                pfrom->setKnown.insert(alertHash);
-                {
-                    LOCK(cs_vNodes);
-                    BOOST_FOREACH(CNode* pnode, vNodes)
-                        alert.RelayTo(pnode);
-                }
-            }
-            else {
-                // Small DoS penalty so peers that send us lots of
-                // duplicate/expired/invalid-signature/whatever alerts
-                // eventually get banned.
-                // This isn't a Misbehaving(100) (immediate ban) because the
-                // peer might be an older or different implementation with
-                // a different signature key, etc.
-                Misbehaving(pfrom->GetId(), 10);
-            }
-        }
-    }
-
+    // HFP0 ALR removed alert system
 
     else if (strCommand == NetMsgType::FILTERLOAD)
     {
@@ -5549,7 +6485,24 @@ bool SendMessages(CNode* pto)
                         fRevertToInv = true;
                         break;
                     }
-                    assert(pBestIndex == NULL || pindex->pprev == pBestIndex);
+                    // HFP0 CRY begin: fix headers announcement edge case
+                    // https://github.com/bitcoin/bitcoin/pull/7919
+                    if (pBestIndex != NULL && pindex->pprev != pBestIndex) {
+                        // This means that the list of blocks to announce don't
+                        // connect to each other.
+                        // This shouldn't really be possible to hit during
+                        // regular operation (because reorgs should take us to
+                        // a chain that has some block not on the prior chain,
+                        // which should be caught by the prior check), but one
+                        // way this could happen is by using invalidateblock /
+                        // reconsiderblock repeatedly on the tip, causing it to
+                        // be added multiple times to vBlockHashesToAnnounce.
+                        // Robustly deal with this rare situation by reverting
+                        // to an inv.
+                        fRevertToInv = true;
+                        break;
+                    }
+                    // HFP0 CRY end
                     pBestIndex = pindex;
                     if (fFoundStartingHeader) {
                         // add this to the headers message
@@ -5704,10 +6657,55 @@ bool SendMessages(CNode* pto)
             NodeId staller = -1;
             FindNextBlocksToDownload(pto->GetId(), MAX_BLOCKS_IN_TRANSIT_PER_PEER - state.nBlocksInFlight, vToDownload, staller);
             BOOST_FOREACH(CBlockIndex *pindex, vToDownload) {
-                vGetData.push_back(CInv(MSG_BLOCK, pindex->GetBlockHash()));
-                MarkBlockAsInFlight(pto->GetId(), pindex->GetBlockHash(), consensusParams, pindex);
-                LogPrint("net", "Requesting block %s (%d) peer=%d\n", pindex->GetBlockHash().ToString(),
-                    pindex->nHeight, pto->id);
+                // HFP0 XTB begin
+                if (IsThinBlocksEnabled() && IsChainNearlySyncd()) {
+                    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+                    CBloomFilter filterMemPool;
+                    if (HaveConnectThinblockNodes() || (HaveThinblockNodes() && CheckThinblockTimer(pindex->GetBlockHash()))) {
+                        // Must download a block from a ThinBlock peer
+                        if (pto->mapThinBlocksInFlight.size() < 1 && pto->ThinBlockCapable()) { // We can only send one thinblock per peer at a time
+                            pto->mapThinBlocksInFlight[pindex->GetBlockHash()] = GetTime();
+                            std::vector<uint256> vOrphanHashes;
+                            for (map<uint256, COrphanTx>::iterator mi = mapOrphanTransactions.begin(); mi != mapOrphanTransactions.end(); ++mi)
+                                vOrphanHashes.push_back((*mi).first);
+                            BuildSeededBloomFilter(filterMemPool, vOrphanHashes);
+                            ss << CInv(MSG_XTHINBLOCK, pindex->GetBlockHash());
+                            ss << filterMemPool;
+                            pto->PushMessage(NetMsgType::GET_XTHIN, ss);
+                            MarkBlockAsInFlight(pto->GetId(), pindex->GetBlockHash(), consensusParams, pindex);
+                            LogPrint("thin", "Requesting thinblock %s (%d) from peer %s (%d)\n", pindex->GetBlockHash().ToString(),
+                                     pindex->nHeight, pto->addrName.c_str(), pto->id);
+                        }
+                    }
+                    else {
+                        // Try to download a thinblock if possible otherwise just download a regular block
+                        if (pto->mapThinBlocksInFlight.size() < 1 && pto->ThinBlockCapable()) { // We can only send one thinblock per peer at a time
+                            pto->mapThinBlocksInFlight[pindex->GetBlockHash()] = GetTime();
+                            std::vector<uint256> vOrphanHashes;
+                            for (map<uint256, COrphanTx>::iterator mi = mapOrphanTransactions.begin(); mi != mapOrphanTransactions.end(); ++mi)
+                                vOrphanHashes.push_back((*mi).first);
+                            BuildSeededBloomFilter(filterMemPool, vOrphanHashes);
+                            ss << CInv(MSG_XTHINBLOCK, pindex->GetBlockHash());
+                            ss << filterMemPool;
+                            pto->PushMessage(NetMsgType::GET_XTHIN, ss);
+                            LogPrint("thin", "Requesting Thinblock %s (%d) from peer %s (%d)\n", pindex->GetBlockHash().ToString(),
+                                     pindex->nHeight, pto->addrName.c_str(), pto->id);
+                        }
+                        else {
+                            vGetData.push_back(CInv(MSG_BLOCK, pindex->GetBlockHash()));
+                            LogPrint("net", "Requesting block %s (%d) from peer %s (%d)\n", pindex->GetBlockHash().ToString(),
+                                     pindex->nHeight, pto->addrName.c_str(), pto->id);
+                        }
+                        MarkBlockAsInFlight(pto->GetId(), pindex->GetBlockHash(), consensusParams, pindex);
+                    }
+                }
+                else {
+                    vGetData.push_back(CInv(MSG_BLOCK, pindex->GetBlockHash()));
+                    MarkBlockAsInFlight(pto->GetId(), pindex->GetBlockHash(), consensusParams, pindex);
+                    LogPrint("net", "Requesting block %s (%d) peer=%d\n", pindex->GetBlockHash().ToString(),
+                                     pindex->nHeight, pto->id);
+                }
+                // HFP0 XTB end
             }
             if (state.nBlocksInFlight == 0 && staller != -1) {
                 if (State(staller)->nStallingSince == 0) {
@@ -5751,35 +6749,46 @@ bool SendMessages(CNode* pto)
  }
 
 /** Maximum size of a block */
-unsigned int MaxBlockSize(uint32_t nBlockTime)
+// HFP0 BSZ begin: parameterize functions with block height
+unsigned int MaxBlockSize(uint32_t nHeight)
 {
-    if (nBlockTime < sizeForkTime.load())
-        return OLD_MAX_BLOCK_SIZE;
-    return MAX_BLOCK_SIZE;
+    if (nHeight < (uint32_t) Params().GetConsensus().nHFP0ActivateSizeForkHeight) {
+        return OLD_MAX_BLOCK_SIZE;  // historical cap: 1MB
+    }
+    else {
+        // post-fork, use the dynamic block size capped by MAX_BLOCK_SIZE
+        return (maxBlockSize > MAX_BLOCK_SIZE) ? MAX_BLOCK_SIZE : maxBlockSize;
+    }
 }
 
 /** Maximum size of a block */
-unsigned int MaxBlockSigops(uint32_t nBlockTime)
+unsigned int MaxBlockSigops(uint32_t nHeight)
 {
-    if (nBlockTime < sizeForkTime.load())
+    if (nHeight < (uint32_t) Params().GetConsensus().nHFP0ActivateSizeForkHeight)
         return std::numeric_limits<uint32_t>::max(); // Use old way of counting
     return MAX_BLOCK_SIGOPS;
 }
-/** Maximum size of a block */
-unsigned int MaxBlockSighash(uint32_t nBlockTime)
+
+/** Maximum signature hash size of a block */
+unsigned int MaxBlockSighash(uint32_t nHeight)
 {
-    if (nBlockTime < sizeForkTime.load())
+    if (nHeight < (uint32_t) Params().GetConsensus().nHFP0ActivateSizeForkHeight)
         return std::numeric_limits<uint32_t>::max(); // no limit before
+    // HFP0 BSZ: decided not to raise this limit since expensive
+    // transactions could be used to cull weak nodes.
+    // The choice of value seems generous and safe for the moment, and can
+    // be raised easily enough.
     return MAX_BLOCK_SIGHASH;
 }
 
 /** Maximum legacy (miscounted) sigops in a block */
-uint32_t MaxLegacySigops(uint32_t nBlockTime)
+uint32_t MaxLegacySigops(uint32_t nHeight)
 {
-    if (nBlockTime < sizeForkTime.load())
-        return MAX_BLOCK_SIGOPS;
+    if (nHeight < (uint32_t) Params().GetConsensus().nHFP0ActivateSizeForkHeight)
+        return OLD_MAX_BLOCK_SIGOPS;
     return std::numeric_limits<uint32_t>::max(); // Use accurately-counted limit
 }
+// HFP0 BSZ end
 
 
 

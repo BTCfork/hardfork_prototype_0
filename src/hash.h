@@ -13,6 +13,19 @@
 #include "uint256.h"
 #include "version.h"
 
+// HFP0 POW begin: safety
+#include "consensus/consensus.h"
+#ifndef HFP0_POW
+#error HFP0_POW not defined!
+#endif
+// HFP0 POW end
+// HFP0 POW begin: merge from satoshisbitcoin
+#if HFP0_POW
+#include "crypto/modified_scrypt_smix.h"
+#include "primitives/block.h"
+#endif
+// HFP0 POW end
+
 #include <vector>
 
 typedef uint256 ChainCode;
@@ -171,6 +184,13 @@ uint256 SerializeHash(const T& obj, int nType=SER_GETHASH, int nVersion=PROTOCOL
     ss << obj;
     return ss.GetHash();
 }
+
+#if HFP0_POW
+// HFP0 POW begin: merge from satoshisbitcoin
+/** Compute the Modified Scrypt hash of a block header object */
+uint256 HashModifiedScrypt(const CBlockHeader *obj);
+// HFP0 POW end
+#endif
 
 unsigned int MurmurHash3(unsigned int nHashSeed, const std::vector<unsigned char>& vDataToHash);
 

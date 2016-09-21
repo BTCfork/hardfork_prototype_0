@@ -4,6 +4,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "chainparams.h"
+#include "consensus/consensus.h"   // HFP0 FRK added for SIZE_FORK_HEIGHT_*
 #include "consensus/merkle.h"
 
 #include "tinyformat.h"
@@ -76,12 +77,20 @@ public:
         consensus.nMajorityWindow = 1000;
         consensus.BIP34Height = 227931;
         consensus.BIP34Hash = uint256S("0x000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8");
-        consensus.powLimit = uint256S("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+
+        // HFP0 DIF begin
+        // HFP0 DIF TODO: tune POW_LIMIT_FORK_MAINNET to reduce difficulty
+        // at fork time to allow early blocks to be found quickly (~10 minutes at
+        // the projected starting hashpower)
+        consensus.powLimitHistoric = uint256S("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        consensus.powLimitResetAtFork = POW_LIMIT_FORK_MAINNET;
         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
-        consensus.nPowTargetSpacing = 10 * 60;
+        consensus.nPowTargetSpacing = 10 * 60;            // 10 minute block times
+        // HFP0 DIF end
+
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.fPowNoRetargeting = false;
-        /** 
+        /**
          * The message start string is designed to be unlikely to occur in normal data.
          * The characters are rarely used upper ASCII, not valid as UTF-8, and produce
          * a large 32-bit integer with any alignment.
@@ -97,20 +106,32 @@ public:
 
         genesis = CreateGenesisBlock(1231006505, 2083236893, 0x1d00ffff, 1, 50 * COIN);
         consensus.hashGenesisBlock = genesis.GetHash();
-        // Timestamps for forking consensus rule changes:
-        // Allow bigger blocks if:
-        consensus.nActivateSizeForkMajority = 750; // 75% of hashpower to activate fork
-        consensus.nSizeForkGracePeriod = 60*60*24*28; // four week grace period after activation
-        consensus.nSizeForkExpiration = 1514764800; // 2018-01-01 00:00:00 GMT
+
+        // HFP0 DIF begin: add MIDAS-specific parameter settings
+        consensus.nPowAdjustmentInterval = 7 * 24 * 60 * 60;   // one week
+        // MIDAS calculates based on expected block height time since genesis
+        // create a variable here so that we don't need to pass entire chainParams through to POW functions
+        // MIDAS start parameters need adjustment to account for historic deviation from expected block height time,
+        // that is what the two variables below are for (they establish a reference block & associated time from
+        // which the expected block  time is evaluated)
+        consensus.nPowMidasBlockStart = 405678;      // accept a more recent block as de-facto instead of genesis, due to existing drift
+        consensus.nPowMidasTimeStart  = 1459757533;  // the time of the chosen start block
+        // HFP0 DIF end
+
+        // HFP0 CLN removed Classic fork majority, grace period and expiration
+
+        // HFP0 FRK begin
+        // block height at which HFP0 hard fork activates
+        consensus.nHFP0ActivateSizeForkHeight = SIZE_FORK_HEIGHT_MAINNET;
+        // HFP0 FRK end
+
         assert(consensus.hashGenesisBlock == uint256S("0x000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"));
         assert(genesis.hashMerkleRoot == uint256S("0x4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"));
 
-        vSeeds.push_back(CDNSSeedData("bitcoin.sipa.be", "seed.bitcoin.sipa.be")); // Pieter Wuille
-        vSeeds.push_back(CDNSSeedData("bluematt.me", "dnsseed.bluematt.me")); // Matt Corallo
-        vSeeds.push_back(CDNSSeedData("dashjr.org", "dnsseed.bitcoin.dashjr.org")); // Luke Dashjr
-        vSeeds.push_back(CDNSSeedData("bitcoinstats.com", "seed.bitcoinstats.com")); // Christian Decker
-        vSeeds.push_back(CDNSSeedData("xf2.org", "bitseed.xf2.org")); // Jeff Garzik
-        vSeeds.push_back(CDNSSeedData("bitcoin.jonasschnelli.ch", "seed.bitcoin.jonasschnelli.ch")); // Jonas Schnelli
+        // HFP0 SED begin
+        // HFP0 TODO: update DNS seeds and static IPs for mainnet
+        vSeeds.push_back(CDNSSeedData("bitcoinhfp0.org", "seed.bitcoinhfp0.org")); // HFP0 changed
+        // HFP0 SED end
 
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,0);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,5);
@@ -163,9 +184,15 @@ public:
         consensus.nMajorityWindow = 100;
         consensus.BIP34Height = 21111;
         consensus.BIP34Hash = uint256S("0x0000000023b3a96d3484e5abb3755c413e7d41500f8e2a5c3f0dd01299cd8ef8");
-        consensus.powLimit = uint256S("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        // HFP0 DIF begin
+        consensus.powLimitHistoric = uint256S("00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        // HFP0 DIF TODO: tune POW_LIMIT_FORK_TESTNET to reduce difficulty
+        // at fork time to allow early blocks to be found quickly (~10 minutes at
+        // the projected starting hashpower)
+        consensus.powLimitResetAtFork = POW_LIMIT_FORK_TESTNET;
         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
-        consensus.nPowTargetSpacing = 10 * 60;
+        consensus.nPowTargetSpacing = 10 * 60;            // 10 minute block times
+        // HFP0 DIF end
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.fPowNoRetargeting = false;
         pchMessageStart[0] = 0x0b;
@@ -181,17 +208,32 @@ public:
         genesis = CreateGenesisBlock(1296688602, 414098458, 0x1d00ffff, 1, 50 * COIN);
         consensus.hashGenesisBlock = genesis.GetHash();
 
-        consensus.nActivateSizeForkMajority = 75; // 75 of 100 to activate fork
-        consensus.nSizeForkGracePeriod = 60*60*24; // 1-day grace period
-        consensus.nSizeForkExpiration = 1514764800; // 2018-01-01 00:00:00 GMT
+        // HFP0 DIF begin: add MIDAS-specific parameter settings
+        consensus.nPowAdjustmentInterval = 7 * 24 * 60 * 60; // one week
+        // MIDAS calculates based on expected block height time since genesis
+        // values below are adjusted values for testnet, but may be out of date
+        // already.
+        // HFP0 DIF TODO: check if testnet values for MIDAS need adjustment
+        consensus.nPowMidasBlockStart = 867197;
+        consensus.nPowMidasTimeStart  = 1464198220;
+        // HFP0 DIF end
+
+        // HFP0 CLN removed Classic fork majority, grace period and expiration
+
+        // HFP0 FRK begin
+        // block height at which HFP0 hard fork activates on testnet
+        consensus.nHFP0ActivateSizeForkHeight = SIZE_FORK_HEIGHT_TESTNET;
+        // HFP0 FRK end
+
         assert(consensus.hashGenesisBlock == uint256S("0x000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943"));
         assert(genesis.hashMerkleRoot == uint256S("0x4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"));
 
         vFixedSeeds.clear();
         vSeeds.clear();
-        vSeeds.push_back(CDNSSeedData("bitcoin.petertodd.org", "testnet-seed.bitcoin.petertodd.org"));
-        vSeeds.push_back(CDNSSeedData("bluematt.me", "testnet-seed.bluematt.me"));
-        vSeeds.push_back(CDNSSeedData("bitcoin.schildbach.de", "testnet-seed.bitcoin.schildbach.de"));
+        // HFP0 SED begin
+        // HFP0 TODO: update DNS seeds and static IPs if you test on testnet/mainnet
+        vSeeds.push_back(CDNSSeedData("bitcoinhfp0.org", "testnet3-seed.bitcoinhfp0.org")); // HFP0 changed
+        // HFP0 SED end
 
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,111);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,196);
@@ -232,9 +274,12 @@ public:
         consensus.nMajorityWindow = 100;
         consensus.BIP34Height = -1; // BIP34 has not necessarily activated on regtest
         consensus.BIP34Hash = uint256();
-        consensus.powLimit = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        // HFP0 DIF begin
+        consensus.powLimitHistoric = uint256S("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        consensus.powLimitResetAtFork = POW_LIMIT_FORK_REGTEST;
         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
-        consensus.nPowTargetSpacing = 10 * 60;
+        consensus.nPowTargetSpacing = 10 * 60;            // 10 minute block times
+        // HFP0 DIF end
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.fPowNoRetargeting = true;
 
@@ -248,14 +293,28 @@ public:
 
         genesis = CreateGenesisBlock(1296688602, 2, 0x207fffff, 1, 50 * COIN);
         consensus.hashGenesisBlock = genesis.GetHash();
-        consensus.nActivateSizeForkMajority = 75; // 75 of 100 to activate fork
-        consensus.nSizeForkGracePeriod = 60*60*24; // 1-day grace period
-        consensus.nSizeForkExpiration = 1514764800; // 2018-01-01 00:00:00 GMT
+        // HFP0 DIF begin: add MIDAS-specific parameter settings
+        consensus.nPowAdjustmentInterval = 7 * 24 * 60 * 60;   // one week
+        // Regtest MIDAS uses genesis block and time
+        consensus.nPowMidasBlockStart = 0;
+        consensus.nPowMidasTimeStart = genesis.nTime;
+        // HFP0 DIF end
+
+        // HFP0 CLN removed Classic fork majority, grace period and expiration
+
+        // HFP0 FRK begin
+        // block height at which HFP0 hard fork activates on regtestnet
+        consensus.nHFP0ActivateSizeForkHeight = SIZE_FORK_HEIGHT_REGTEST;
+        // HFP0 FRK end
+
         assert(consensus.hashGenesisBlock == uint256S("0x0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206"));
         assert(genesis.hashMerkleRoot == uint256S("0x4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"));
 
         vFixedSeeds.clear(); //! Regtest mode doesn't have any fixed seeds.
         vSeeds.clear();  //! Regtest mode doesn't have any DNS seeds.
+        // HFP0 TMP begin: define test environment static seeds for regtest, for quicker testing
+        vFixedSeeds = std::vector<SeedSpec6>(pnSeed6_test, pnSeed6_test + ARRAYLEN(pnSeed6_test));
+        // HFP0 TMP end
 
         fMiningRequiresPeers = false;
         fDefaultConsistencyChecks = true;

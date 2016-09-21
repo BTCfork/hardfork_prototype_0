@@ -11,19 +11,80 @@
 #include "random.h"
 #include "uint256.h"
 #include "util.h"
+// HFP0 TST begin
+#include "keystore.h"
+#include "script/sign.h"
+#include "blocksizecalculator.h"
+// HFP0 TST end
 
 #include "test/test_bitcoin.h"
 
 #include <boost/atomic.hpp>
 #include <boost/test/unit_test.hpp>
 
-extern boost::atomic<uint32_t> sizeForkTime;
+// HFP0 TST begin
+// use the official number of blocks for median-based computation
+#define NUM_BLOCKS_FOR_SIZE_TEST   NUM_BLOCKS_FOR_MEDIAN_BLOCK
+// HFP0 TST end
 
-BOOST_FIXTURE_TEST_SUITE(block_size_tests, TestingSetup)
+
+struct TestChainForBlockSizeSetup : public TestChain100Setup {
+    void FillBlock(CBlock& block, unsigned int nSize);
+    // new
+	void BuildSmallBlocks(unsigned int numblocks);
+    void AdvanceToBeforeFork();
+    void AdvanceToFork();
+    void CreateSmallBlock();
+    bool IsForkedBlock(CBlock& block);
+    bool TestCheckBlock(CBlock& block, uint32_t nHeight, unsigned int nSize, bool check_is_forked_version);
+
+};
+
+
+// create a small (no txs) block
+void TestChainForBlockSizeSetup::CreateSmallBlock()
+{
+    coinbaseKey.MakeNewKey(true);
+    CScript scriptPubKey = CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG;
+    std::vector<CMutableTransaction> noTxns;
+    CBlock b = CreateAndProcessBlock(noTxns, scriptPubKey);
+    coinbaseTxns.push_back(b.vtx[0]);
+    // do computation only if not past fork height, otherwise it is done automatically
+    if ((unsigned int)chainActive.Height() < SIZE_FORK_HEIGHT_REGTEST)
+        BlockSizeCalculator::ComputeBlockSize(chainActive.Tip(), NUM_BLOCKS_FOR_SIZE_TEST);
+}
+
+// create a certain number of small blocks
+void TestChainForBlockSizeSetup::BuildSmallBlocks(unsigned int numblocks)
+{
+	for (unsigned int i = 0; i < numblocks; ++i) {
+        CreateSmallBlock();
+    }
+}
+
+
+void TestChainForBlockSizeSetup::AdvanceToBeforeFork()
+{
+    // generate enough blocks so we end up a block before fork trigger height
+    // (TestChain100Setup already generated 100 blocks)
+    unsigned int start_height = chainActive.Height();
+    TestChainForBlockSizeSetup::BuildSmallBlocks(SIZE_FORK_HEIGHT_REGTEST - start_height - 2);
+}
+
+
+void TestChainForBlockSizeSetup::AdvanceToFork()
+{
+    // generate enough blocks so we end up a block before fork trigger height
+    // (TestChain100Setup already generated 100 blocks)
+    unsigned int start_height = chainActive.Height();
+    TestChainForBlockSizeSetup::BuildSmallBlocks(SIZE_FORK_HEIGHT_REGTEST - start_height - 1);
+
+}
+
 
 // Fill block with dummy transactions until it's serialized size is exactly nSize
-static void
-FillBlock(CBlock& block, unsigned int nSize)
+// HFP0 TST : remove 'static' qualifier
+void TestChainForBlockSizeSetup::FillBlock(CBlock& block, unsigned int nSize)
 {
     assert(block.vtx.size() > 0); // Start with at least a coinbase
 
@@ -32,7 +93,7 @@ FillBlock(CBlock& block, unsigned int nSize)
         block.vtx.resize(1); // passed in block is too big, start with just coinbase
         nBlockSize = ::GetSerializeSize(block, SER_NETWORK, PROTOCOL_VERSION);
     }
-    
+
     CMutableTransaction tx;
     tx.vin.resize(1);
     tx.vin[0].scriptSig = CScript() << OP_11;
@@ -62,108 +123,79 @@ FillBlock(CBlock& block, unsigned int nSize)
     assert(nBlockSize == nSize);
 }
 
-static bool TestCheckBlock(CBlock& block, uint64_t nTime, unsigned int nSize)
+
+// check if block version is in the range (min..max) of forked block version numbers
+bool TestChainForBlockSizeSetup::IsForkedBlock(CBlock& block)
 {
-    SetMockTime(nTime);
-    block.nTime = nTime;
+    return ((uint32_t)block.nVersion >= (BASE_VERSION + FULL_FORK_VERSION_MIN) && (uint32_t)block.nVersion <= (BASE_VERSION + FULL_FORK_VERSION_MAX));
+}
+
+
+// HFP0 TST : remove 'static' qualifier
+bool TestChainForBlockSizeSetup::TestCheckBlock(CBlock& block, uint32_t nHeight, unsigned int nSize, bool is_forked_version)
+{
+    uint64_t t = GetTime();
+    block.nTime = t;
     FillBlock(block, nSize);
     CValidationState validationState;
     bool fResult = CheckBlock(block, validationState, false, false) && validationState.IsValid();
-    SetMockTime(0);
-    return fResult;
+    return fResult && (IsForkedBlock(block) == is_forked_version);
 }
+
+
+// HFP0 TST begin: rename test suite to conform to convention
+BOOST_FIXTURE_TEST_SUITE(block_size_tests, TestChainForBlockSizeSetup)
+// HFP0 TST end
 
 //
 // Unit test CheckBlock() for conditions around the block size hard fork
 //
-BOOST_AUTO_TEST_CASE(BigBlockFork_Time1)
+BOOST_AUTO_TEST_CASE(BigBlockFork_AroundForkHeight)
 {
     CScript scriptPubKey = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
-    const CChainParams& chainparams = Params(CBaseChainParams::MAIN);
+    const CChainParams& chainparams = Params(CBaseChainParams::REGTEST);
     CBlockTemplate *pblocktemplate;
-
-    uint64_t t = GetTime();
+    CBlock *pblock = NULL;
     uint64_t preforkSize = OLD_MAX_BLOCK_SIZE;
-    uint64_t postforkSize = MAX_BLOCK_SIZE;
-    uint64_t tActivate = t;
-
-    sizeForkTime.store(tActivate);
+    uint64_t postforkSize = 2 * OLD_MAX_BLOCK_SIZE;
 
     LOCK(cs_main);
 
+    // After setup (block 100), way before fork height...
     BOOST_CHECK(pblocktemplate = CreateNewBlock(chainparams, scriptPubKey));
-    CBlock *pblock = &pblocktemplate->block;
+    pblock = &pblocktemplate->block;
+    BOOST_CHECK(TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST-1, preforkSize, false)); // 1MB : valid
+    BOOST_CHECK(!TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST-1, preforkSize+1, false)); // >1MB : invalid
+    BOOST_CHECK(!TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST-1, postforkSize, false)); // big : invalid
 
-    // Before fork time...
-    BOOST_CHECK(TestCheckBlock(*pblock, t-1LL, preforkSize)); // 1MB : valid
-    BOOST_CHECK(!TestCheckBlock(*pblock, t-1LL, preforkSize+1)); // >1MB : invalid
-    BOOST_CHECK(!TestCheckBlock(*pblock, t-1LL, postforkSize)); // big : invalid
+    // Before fork height...
+    TestChainForBlockSizeSetup::AdvanceToBeforeFork();
+    delete pblocktemplate;
+    BOOST_CHECK(pblocktemplate = CreateNewBlock(chainparams, scriptPubKey));
+    pblock = &pblocktemplate->block;
+    BOOST_CHECK(TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST-1, preforkSize, false)); // 1MB : valid
+    BOOST_CHECK(!TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST-1, preforkSize+1, false)); // >1MB : invalid
+    BOOST_CHECK(!TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST-1, postforkSize, false)); // big : invalid
 
-    // Exactly at fork time...
-    BOOST_CHECK(TestCheckBlock(*pblock, t, preforkSize)); // 1MB : valid
-    BOOST_CHECK(TestCheckBlock(*pblock, t, postforkSize)); // big : valid
-    BOOST_CHECK(!TestCheckBlock(*pblock, t,  postforkSize+1)); // big+1 : invalid
+    // Exactly at fork height... new version, but bigger block size is not yet in effect - only at next block.
+    TestChainForBlockSizeSetup::AdvanceToFork();
+    delete pblocktemplate;
+    BOOST_CHECK(pblocktemplate = CreateNewBlock(chainparams, scriptPubKey));
+    pblock = &pblocktemplate->block;
+    BOOST_CHECK(TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST, preforkSize, true)); // 1MB : valid
+    BOOST_CHECK(!TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST, postforkSize, true)); // big : invalid
+    BOOST_CHECK(!TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST, postforkSize+1, true)); // big+1 : invalid
 
-    // After fork time...
-    BOOST_CHECK(TestCheckBlock(*pblock, t+11000, preforkSize)); // 1MB : valid
-    BOOST_CHECK(TestCheckBlock(*pblock, t+11000, postforkSize)); // big : valid
-    BOOST_CHECK(!TestCheckBlock(*pblock, t+11000,  postforkSize+1)); // big+1 : invalid
-
-    sizeForkTime.store(std::numeric_limits<uint32_t>::max());
+    // Past fork height...
+    TestChainForBlockSizeSetup::BuildSmallBlocks(1);
+    delete pblocktemplate;
+    BOOST_CHECK(pblocktemplate = CreateNewBlock(chainparams, scriptPubKey));
+    pblock = &pblocktemplate->block;
+    BOOST_CHECK(TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST, preforkSize, true)); // 1MB : valid
+    BOOST_CHECK(TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST, postforkSize, true)); // big : valid
+    BOOST_CHECK(!TestCheckBlock(*pblock, SIZE_FORK_HEIGHT_REGTEST, postforkSize+1, true)); // big+1 : invalid
 }
 
-// Test activation time 30 days after earliest possible:
-BOOST_AUTO_TEST_CASE(BigBlockFork_Time2)
-{
-    CScript scriptPubKey = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
-    CBlockTemplate *pblocktemplate;
-    const CChainParams& chainparams = Params(CBaseChainParams::MAIN);
-
-    uint64_t t = GetTime();
-    uint64_t preforkSize = OLD_MAX_BLOCK_SIZE;
-    uint64_t postforkSize = MAX_BLOCK_SIZE;
-
-    uint64_t tActivate = t+60*60*24*30;
-    sizeForkTime.store(tActivate);
-
-    LOCK(cs_main);
-
-    BOOST_CHECK(pblocktemplate = CreateNewBlock(chainparams, scriptPubKey));
-    CBlock *pblock = &pblocktemplate->block;
-
-    // Exactly at fork time...
-    BOOST_CHECK(TestCheckBlock(*pblock, t, preforkSize)); // 1MB : valid
-    BOOST_CHECK(!TestCheckBlock(*pblock, t, postforkSize)); // big : invalid
-
-    // Exactly at activation time....
-    BOOST_CHECK(TestCheckBlock(*pblock, tActivate, preforkSize)); // 1MB : valid
-    BOOST_CHECK(TestCheckBlock(*pblock, tActivate, postforkSize)); // big : valid
- 
-    sizeForkTime.store(std::numeric_limits<uint32_t>::max());
-}
-
-// Test: no miner consensus, no big blocks:
-BOOST_AUTO_TEST_CASE(BigBlockFork_NoActivation)
-{
-    CScript scriptPubKey = CScript() << ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f") << OP_CHECKSIG;
-    CBlockTemplate *pblocktemplate;
-    const CChainParams& chainparams = Params(CBaseChainParams::MAIN);
-
-    uint64_t t = GetTime();
-    uint64_t preforkSize = OLD_MAX_BLOCK_SIZE;
-    uint64_t postforkSize = MAX_BLOCK_SIZE;
-
-    LOCK(cs_main);
-
-    BOOST_CHECK(pblocktemplate = CreateNewBlock(chainparams, scriptPubKey));
-    CBlock *pblock = &pblocktemplate->block;
-
-    // Exactly at fork time...
-    BOOST_CHECK(TestCheckBlock(*pblock, t, preforkSize)); // 1MB : valid
-    BOOST_CHECK(!TestCheckBlock(*pblock, t, postforkSize)); // big : invalid
-
-    uint64_t tAfter = t+11000;
-    BOOST_CHECK(!TestCheckBlock(*pblock, tAfter, postforkSize));
-}
+// HFP0 TST removed obsolete test cases dealing with grace period/election
 
 BOOST_AUTO_TEST_SUITE_END()

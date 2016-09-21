@@ -37,6 +37,11 @@ public:
     UniValue(int val_) {
         setInt(val_);
     }
+    // HFP0 XTB begin
+    UniValue(unsigned int val_) {
+        setInt((uint64_t)val_);
+    }
+    // HFP0 XTB end
     UniValue(double val_) {
         setFloat(val_);
     }

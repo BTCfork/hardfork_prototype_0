@@ -20,7 +20,9 @@ struct CDiskTxPos;
 class uint256;
 
 //! -dbcache default (MiB)
-static const int64_t nDefaultDbCache = 100;
+// HFP0 XTB begin: raise orphan cache size from 100 to 300
+static const int64_t nDefaultDbCache = 300; // BU Xtreme Thinblocks bump to support a larger ophan cache
+// HFP0 XTB end
 //! max. -dbcache in (MiB)
 static const int64_t nMaxDbCache = sizeof(void*) > 4 ? 16384 : 1024;
 //! min. -dbcache in (MiB)

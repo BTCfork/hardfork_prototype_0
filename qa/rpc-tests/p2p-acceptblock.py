@@ -153,6 +153,7 @@ class AcceptBlockTest(BitcoinTestFramework):
         block_time = time.time() + 1
         for i in xrange(2):
             blocks_h2.append(create_block(tips[i], create_coinbase(2), block_time))
+            blocks_h2[i].nVersion = nVersionFromHeight(self.nodes[0].getblockcount())  # HFP0 TST
             blocks_h2[i].solve()
             block_time += 1
         test_node.send_message(msg_block(blocks_h2[0]))
@@ -217,6 +218,7 @@ class AcceptBlockTest(BitcoinTestFramework):
         for j in xrange(2):
             for i in xrange(288):
                 next_block = create_block(tips[j].sha256, create_coinbase(i + 4), tips[j].nTime+1)
+                next_block.nVersion = nVersionFromHeight(4+i+j)  # HFP0 TST
                 next_block.solve()
                 if j==0:
                     test_node.send_message(msg_block(next_block))

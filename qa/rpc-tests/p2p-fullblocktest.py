@@ -5,6 +5,14 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 #
 
+# HFP0 TST TODO: this test might need updating for > 1MB blocks.
+# Have not looked at it in detail - it currently passes, so perhaps it
+# is still only testing within the 1MB region prior to the fork, or not
+# doing the things necessary to ratchet up the adaptive block size.
+# This test has a bunch of hardcoded constants like the 1e6 bytes
+# historic block size cap and the sigops divisor (now BLOCK_TO_SIGOPS_DIVISOR).
+# At least that definitely needs cleanup.
+
 from test_framework.test_framework import ComparisonTestFramework
 from test_framework.util import *
 from test_framework.comptool import TestManager, TestInstance, RejectResult

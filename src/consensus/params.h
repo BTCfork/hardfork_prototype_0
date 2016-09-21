@@ -23,21 +23,28 @@ struct Params {
     int BIP34Height;
     uint256 BIP34Hash;
     /** Proof of work parameters */
-    uint256 powLimit;
+    // HFP0 DIF begin: new names for pre-/post-fork POW limits
+    uint256 powLimitHistoric;
+    uint256 powLimitResetAtFork;
+    // HFP0 DIF end
     bool fPowAllowMinDifficultyBlocks;
     bool fPowNoRetargeting;
     int64_t nPowTargetSpacing;
     int64_t nPowTargetTimespan;
+    // HFP0 DIF begin: add new MIDAS-specific parameters
+    int64_t nPowAdjustmentInterval;
+    uint32_t nPowMidasTimeStart;
+    int nPowMidasBlockStart;
+    // HFP0 DIF end
     int64_t DifficultyAdjustmentInterval() const { return nPowTargetTimespan / nPowTargetSpacing; }
 
-    /** 2MB fork activation parameters */
-    int nActivateSizeForkMajority;
-    int64_t nSizeForkGracePeriod;
-    int64_t nSizeForkExpiration;
+    // HFP0 CLN removed Classic 2MB fork parameters and access functions
 
-    int ActivateSizeForkMajority() const { return nActivateSizeForkMajority; }
-    int64_t SizeForkGracePeriod() const { return nSizeForkGracePeriod; }
-    int64_t SizeForkExpiration() const { return nSizeForkExpiration; }
+    // HFP0 FRK begin
+    int nHFP0ActivateSizeForkHeight;     // block height trigger
+
+    int HFP0ActivateSizeForkHeight() const { return nHFP0ActivateSizeForkHeight; };
+    // HFP0 FRK end
 };
 } // namespace Consensus
 

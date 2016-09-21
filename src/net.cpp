@@ -19,6 +19,7 @@
 #include "scheduler.h"
 #include "ui_interface.h"
 #include "utilstrencodings.h"
+#include "xthinblocks.h"        // HFP0 XTB added
 
 #ifdef WIN32
 #include <string.h>
@@ -218,7 +219,11 @@ void AdvertizeLocal(CNode *pnode)
         }
         if (addrLocal.IsRoutable())
         {
-            LogPrintf("AdvertizeLocal: advertizing address %s\n", addrLocal.ToString());
+            // HFP0 XTB begin
+            // HFP0 DBG begin
+            LogPrintf("AdvertiseLocal: advertising address %s\n", addrLocal.ToString());
+            // HFP0 DBG end
+            // HFP0 XTB end
             pnode->PushAddress(addrLocal);
         }
     }
@@ -1510,8 +1515,11 @@ void static ProcessOneShot()
 void ThreadOpenConnections()
 {
     // Connect to specific addresses
-    if (mapArgs.count("-connect") && mapMultiArgs["-connect"].size() > 0)
+    // HFP0 XTB begin
+    if ((mapArgs.count("-connect") && mapMultiArgs["-connect"].size() > 0) ||
+        (mapArgs.count("-connect-thinblock") && mapMultiArgs["-connect-thinblock"].size() > 0)) // BUIP010 Xtreme Thinblocks
     {
+    // HFP0 XTB end
         for (int64_t nLoop = 0;; nLoop++)
         {
             ProcessOneShot();
@@ -1525,6 +1533,9 @@ void ThreadOpenConnections()
                 }
             }
             MilliSleep(500);
+            // HFP0 XTB begin
+            ConnectToThinBlockNodes();
+            // HFP0 XTB end
         }
     }
 
@@ -1724,7 +1735,9 @@ void ThreadMessageHandler()
             }
         }
 
-        bool fSleep = true;
+        // HFP0 XTB begin
+        bool fSleep = ThinBlockMessageHandler(vNodesCopy);
+        // HFP0 XTB end
 
         BOOST_FOREACH(CNode* pnode, vNodesCopy)
         {
@@ -1846,8 +1859,11 @@ bool BindListenPort(const CService &addrBind, string& strError, bool fWhiteliste
     if (::bind(hListenSocket, (struct sockaddr*)&sockaddr, len) == SOCKET_ERROR)
     {
         int nErr = WSAGetLastError();
-        if (nErr == WSAEADDRINUSE)
-            strError = strprintf(_("Unable to bind to %s on this computer. Bitcoin Classic is probably already running."), addrBind.ToString());
+        if (nErr == WSAEADDRINUSE) {
+            // HFP0 REN begin
+            strError = strprintf(_("Unable to bind to %s on this computer. Bitcoin HFP0 is probably already running."), addrBind.ToString());
+            // HFP0 REN end
+        }
         else
             strError = strprintf(_("Unable to bind to %s on this computer (bind returned error %s)"), addrBind.ToString(), NetworkErrorString(nErr));
         LogPrintf("%s\n", strError);
@@ -2113,7 +2129,9 @@ void CNode::RecordBytesSent(uint64_t bytes)
 void CNode::SetMaxOutboundTarget(uint64_t limit)
 {
     LOCK(cs_totalBytesSent);
-    uint64_t recommendedMinimum = (nMaxOutboundTimeframe / 600) * MAX_BLOCK_SIZE;
+    // HFP0 BSZ begin: use dynamic maxBlockSize instead of MAX_BLOCK_SIZE
+    uint64_t recommendedMinimum = (nMaxOutboundTimeframe / 600) * maxBlockSize;
+    // HFP0 BSZ end
     nMaxOutboundLimit = limit;
 
     if (limit > 0 && limit < recommendedMinimum)
@@ -2168,7 +2186,9 @@ bool CNode::OutboundTargetReached(bool historicalBlockServingLimit)
     {
         // keep a large enought buffer to at least relay each block once
         uint64_t timeLeftInCycle = GetMaxOutboundTimeLeftInCycle();
-        uint64_t buffer = timeLeftInCycle / 600 * MAX_BLOCK_SIZE;
+        // HFP0 BSZ begin: use dynamic maxBlockSize instead of MAX_BLOCK_SIZE
+        uint64_t buffer = timeLeftInCycle / 600 * maxBlockSize;
+        // HFP0 BSZ end
         if (buffer >= nMaxOutboundLimit || nMaxOutboundTotalBytesSentInCycle >= nMaxOutboundLimit - buffer)
             return true;
     }
@@ -2375,11 +2395,23 @@ CNode::CNode(SOCKET hSocketIn, const CAddress& addrIn, const std::string& addrNa
     nNextInvSend = 0;
     fRelayTxes = false;
     pfilter = new CBloomFilter();
+    // HFP0 XTB begin
+    pThinBlockFilter = new CBloomFilter();
+    // HFP0 XTB end
     nPingNonceSent = 0;
     nPingUsecStart = 0;
     nPingUsecTime = 0;
     fPingQueued = false;
     nMinPingUsecTime = std::numeric_limits<int64_t>::max();
+    // HFP0 XTB begin
+    thinBlockWaitingForTxns = -1;
+
+    std::string xmledName;
+    if (addrNameIn != "")
+        xmledName = addrNameIn;
+    else
+        xmledName="ip" + addr.ToStringIP() + "p" + addr.ToStringPort();
+    // HFP0 XTB end
 
     {
         LOCK(cs_nLastNodeId);
@@ -2404,6 +2436,9 @@ CNode::~CNode()
 
     if (pfilter)
         delete pfilter;
+    // HFP0 XTB begin
+    delete pThinBlockFilter;
+    // HFP0 XTB end
 
     GetNodeSignals().FinalizeNode(GetId());
 }
@@ -2592,14 +2627,14 @@ bool CBanDB::Read(banmap_t& banSet)
         // ... verify the network matches ours
         if (memcmp(pchMsgTmp, Params().MessageStart(), sizeof(pchMsgTmp)))
             return error("%s: Invalid network magic number", __func__);
-        
+
         // de-serialize address data into one CAddrMan object
         ssBanlist >> banSet;
     }
     catch (const std::exception& e) {
         return error("%s: Deserialize or I/O error - %s", __func__, e.what());
     }
-    
+
     return true;
 }
 

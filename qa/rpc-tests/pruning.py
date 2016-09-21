@@ -33,8 +33,10 @@ class PruneTest(BitcoinTestFramework):
         self.is_network_split = False
 
         # Create nodes 0 and 1 to mine
-        self.nodes.append(start_node(0, self.options.tmpdir, ["-debug","-maxreceivebuffer=20000","-blockmaxsize=999000", "-checkblocks=5"], timewait=900))
-        self.nodes.append(start_node(1, self.options.tmpdir, ["-debug","-maxreceivebuffer=20000","-blockmaxsize=999000", "-checkblocks=5"], timewait=900))
+        # HFP0 TST, BSZ begin: added -scaleblocksizeoptions=0 (does not fix test by itself, but done to eliminate a further possible source of malfunction)
+        self.nodes.append(start_node(0, self.options.tmpdir, ["-debug","-maxreceivebuffer=20000","-blockmaxsize=999000", "-scaleblocksizeoptions=0", "-checkblocks=5"], timewait=900))
+        self.nodes.append(start_node(1, self.options.tmpdir, ["-debug","-maxreceivebuffer=20000","-blockmaxsize=999000", "-scaleblocksizeoptions=0", "-checkblocks=5"], timewait=900))
+        # HFP0 TST, BSZ end
 
         # Create node 2 to test pruning
         self.nodes.append(start_node(2, self.options.tmpdir, ["-debug","-maxreceivebuffer=20000","-prune=550"], timewait=900))

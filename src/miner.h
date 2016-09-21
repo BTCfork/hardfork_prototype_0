@@ -10,6 +10,19 @@
 
 #include <stdint.h>
 
+// HFP0 POW begin: safety
+#include "consensus/consensus.h"
+#ifndef HFP0_POW
+#error HFP0_POW not defined!
+#endif
+// HFP0 POW end
+#if HFP0_POW
+// HFP0 POW begin
+static bool shutdownAllMinerThreads = false;
+inline void SetShutdownAllMinerThreads() { shutdownAllMinerThreads = true; }
+// HFP0 POW end
+#endif
+
 class CBlockIndex;
 class CChainParams;
 class CReserveKey;

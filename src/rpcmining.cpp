@@ -165,11 +165,19 @@ UniValue generate(const UniValue& params, bool fHelp)
             LOCK(cs_main);
             IncrementExtraNonce(pblock, chainActive.Tip(), nExtraNonce);
         }
-        while (!CheckProofOfWork(pblock->GetHash(), pblock->nBits, Params().GetConsensus())) {
+        // HFP0 FRK, DIF begin
+        // if block is at fork height or onwards, use new POW limit and set correct nVersion
+        uint256 activePowLimit = Params().GetConsensus().powLimitHistoric;
+        if (nHeight >= Params().GetConsensus().nHFP0ActivateSizeForkHeight) {
+            activePowLimit = Params().GetConsensus().powLimitResetAtFork;
+            pblock->nVersion |= FULL_FORK_VERSION_CUR;
+        }
+        while (!CheckProofOfWork(pblock->GetHash(), pblock->nBits, activePowLimit)) {
             // Yes, there is a chance every nonce could fail to satisfy the -regtest
             // target -- 1 in 2^(2^32). That ain't gonna happen.
             ++pblock->nNonce;
         }
+        // HFP0 FRK, DIF end
         CValidationState state;
         if (!ProcessNewBlock(state, Params(), NULL, pblock, true, NULL))
             throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
@@ -582,9 +590,11 @@ UniValue getblocktemplate(const UniValue& params, bool fHelp)
     result.push_back(Pair("mintime", (int64_t)pindexPrev->GetMedianTimePast()+1));
     result.push_back(Pair("mutable", aMutable));
     result.push_back(Pair("noncerange", "00000000ffffffff"));
-    result.push_back(Pair("sigoplimit", static_cast<int64_t>(MaxBlockSigops(pblock->nTime))));
-    result.push_back(Pair("sighashlimit", static_cast<int64_t>(MaxBlockSighash(pblock->nTime))));
-    result.push_back(Pair("sizelimit", (int64_t)MaxBlockSize(pblock->nTime)));
+    // HFP0 BSZ begin: change to use block height instead of block time
+    result.push_back(Pair("sigoplimit", static_cast<int64_t>(MaxBlockSigops(pindexPrev->nHeight+1))));
+    result.push_back(Pair("sighashlimit", static_cast<int64_t>(MaxBlockSighash(pindexPrev->nHeight+1))));
+    result.push_back(Pair("sizelimit", (int64_t)MaxBlockSize(pindexPrev->nHeight+1)));
+    // HFP0 BSZ end
     result.push_back(Pair("curtime", pblock->GetBlockTime()));
     result.push_back(Pair("bits", strprintf("%08x", pblock->nBits)));
     result.push_back(Pair("height", (int64_t)(pindexPrev->nHeight+1)));

@@ -9,7 +9,20 @@
  * network protocol versioning
  */
 
-static const int PROTOCOL_VERSION = 70012;
+// HFP0 POW begin: safety
+#include <consensus/consensus.h>
+#ifndef HFP0_POW
+#error HFP0_POW not defined!
+#endif
+// HFP0 POW end
+// HFP0 FRK TODO: stop accepting "not our kind" protocol after fork triggers
+#define POW_PROTOCOL_VERSION   79002
+#define SHA_PROTOCOL_VERSION   79001
+#if HFP0_POW
+static const int PROTOCOL_VERSION = POW_PROTOCOL_VERSION;
+#else
+static const int PROTOCOL_VERSION = SHA_PROTOCOL_VERSION;
+#endif
 
 //! initial proto version, to be increased after version/verack negotiation
 static const int INIT_PROTO_VERSION = 209;

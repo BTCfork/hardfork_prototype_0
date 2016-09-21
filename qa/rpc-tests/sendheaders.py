@@ -12,7 +12,7 @@ from test_framework.blocktools import create_block, create_coinbase
 '''
 SendHeadersTest -- test behavior of headers messages to announce blocks.
 
-Setup: 
+Setup:
 
 - Two nodes, two p2p connections to node0. One p2p connection should only ever
   receive inv's (omitted from testing description below, this is our control).
@@ -166,7 +166,7 @@ class BaseNode(NodeConnCB):
             time.sleep(self.sleep_time)
             timeout -= self.sleep_time
         raise AssertionError("Sync failed to complete")
-        
+
     def sync_with_ping(self, timeout=60):
         self.send_message(msg_ping(nonce=self.ping_counter))
         test_function = lambda: self.last_pong.nonce == self.ping_counter
@@ -214,7 +214,9 @@ class SendHeadersTest(BitcoinTestFramework):
 
     def setup_network(self):
         self.nodes = []
-        self.nodes = start_nodes(2, self.options.tmpdir, [["-debug", "-logtimemicros=1"]]*2)
+        # HFP0 XTB begin
+        self.nodes = start_nodes(2, self.options.tmpdir, [["-debug", "-logtimemicros=1", "-use-thinblocks=false"]]*2)
+        # HFP0 XTB end
         connect_nodes(self.nodes[0], 1)
 
     # mine count blocks and return the new tip
@@ -289,6 +291,7 @@ class SendHeadersTest(BitcoinTestFramework):
                 last_time = self.nodes[0].getblock(self.nodes[0].getbestblockhash())['time']
                 block_time = last_time + 1
                 new_block = create_block(tip, create_coinbase(height+1), block_time)
+                new_block.nVersion = nVersionFromHeight(height+1)   # HFP0 TST
                 new_block.solve()
                 test_node.send_header_for_blocks([new_block])
                 test_node.wait_for_getdata([new_block.sha256], timeout=5)
@@ -323,6 +326,7 @@ class SendHeadersTest(BitcoinTestFramework):
                 blocks = []
                 for b in xrange(i+1):
                     blocks.append(create_block(tip, create_coinbase(height), block_time))
+                    blocks[-1].nVersion = nVersionFromHeight(height)   # HFP0 TST
                     blocks[-1].solve()
                     tip = blocks[-1].sha256
                     block_time += 1
@@ -373,7 +377,7 @@ class SendHeadersTest(BitcoinTestFramework):
             assert_equal(inv_node.check_last_announcement(inv=[tip]), True)
             assert_equal(test_node.check_last_announcement(headers=new_block_hashes), True)
 
-            block_time += 8 
+            block_time += 8
 
             # Mine a too-large reorg, which should be announced with a single inv
             new_block_hashes = self.mine_reorg(length=8)
@@ -411,7 +415,7 @@ class SendHeadersTest(BitcoinTestFramework):
                     test_node.get_data([tip])
                     test_node.wait_for_block(tip)
                     # This time, try sending either a getheaders to trigger resumption
-                    # of headers announcements, or mine a new block and inv it, also 
+                    # of headers announcements, or mine a new block and inv it, also
                     # triggering resumption of headers announcements.
                     if j == 0:
                         test_node.get_headers(locator=[tip], hashstop=0L)
@@ -436,6 +440,7 @@ class SendHeadersTest(BitcoinTestFramework):
         blocks = []
         for b in xrange(2):
             blocks.append(create_block(tip, create_coinbase(height), block_time))
+            blocks[-1].nVersion = nVersionFromHeight(height)   # HFP0 TST
             blocks[-1].solve()
             tip = blocks[-1].sha256
             block_time += 1
@@ -454,6 +459,7 @@ class SendHeadersTest(BitcoinTestFramework):
         blocks = []
         for b in xrange(3):
             blocks.append(create_block(tip, create_coinbase(height), block_time))
+            blocks[-1].nVersion = nVersionFromHeight(height)   # HFP0 TST
             blocks[-1].solve()
             tip = blocks[-1].sha256
             block_time += 1
@@ -475,6 +481,7 @@ class SendHeadersTest(BitcoinTestFramework):
         # Create extra blocks for later
         for b in xrange(20):
             blocks.append(create_block(tip, create_coinbase(height), block_time))
+            blocks[-1].nVersion = nVersionFromHeight(height)   # HFP0 TST
             blocks[-1].solve()
             tip = blocks[-1].sha256
             block_time += 1

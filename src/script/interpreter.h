@@ -81,6 +81,11 @@ enum
     //
     // See BIP65 for details.
     SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY = (1U << 9),
+
+    // HFP0 CSV (BIP112) begin
+    // support CHECKSEQUENCEVERIFY opcode - see BIP112 for details
+    SCRIPT_VERIFY_CHECKSEQUENCEVERIFY = (1U << 10),
+    // HFP0 CSV (BIP112) end
 };
 
 bool CheckSignatureEncoding(const std::vector<unsigned char> &vchSig, unsigned int flags, ScriptError* serror);
@@ -99,6 +104,13 @@ public:
     {
          return false;
     }
+
+    // HFP0 CSV (BIP112) begin
+    virtual bool CheckSequence(const CScriptNum& nSequence) const
+    {
+         return false;
+    }
+    // HFP0 CSV (BIP112) end
 
     virtual ~BaseSignatureChecker() {}
 };
@@ -120,6 +132,7 @@ public:
     bool CheckLockTime(const CScriptNum& nLockTime) const;
     size_t GetBytesHashed() const { return nBytesHashed; }
     size_t GetNumSigops() const { return nSigops; }
+    bool CheckSequence(const CScriptNum& nSequence) const;  // HFP0 CSV (BIP112) added
 };
 
 class MutableTransactionSignatureChecker : public TransactionSignatureChecker

@@ -13,7 +13,9 @@
 
 #include <boost/test/unit_test.hpp>
 
-BOOST_FIXTURE_TEST_SUITE(PrevectorTests, TestingSetup)
+// HFP0 CLN begin: harmonize unit test suite names w/filenames
+BOOST_FIXTURE_TEST_SUITE(prevector_tests, TestingSetup)
+// HFP0 CLN end
 
 template<unsigned int N, typename T>
 class prevector_tester {

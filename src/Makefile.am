@@ -37,7 +37,7 @@ LIBUNIVALUE=univalue/libunivalue.la
 
 $(LIBSECP256K1): $(wildcard secp256k1/src/*) $(wildcard secp256k1/include/*)
 	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
-  
+
 $(LIBUNIVALUE): $(wildcard univalue/lib/*) $(wildcard univalue/include/*)
 	$(AM_V_at)$(MAKE) $(AM_MAKEFLAGS) -C $(@D) $(@F)
 
@@ -148,6 +148,7 @@ BITCOIN_CORE_H = \
   support/cleanse.h \
   support/pagelocker.h \
   sync.h \
+  thinblock.h \
   threadsafety.h \
   timedata.h \
   tinyformat.h \
@@ -157,6 +158,7 @@ BITCOIN_CORE_H = \
   ui_interface.h \
   uint256.h \
   undo.h \
+  xthinblocks.h \
   util.h \
   utilmoneystr.h \
   utilstrencodings.h \
@@ -171,7 +173,8 @@ BITCOIN_CORE_H = \
   zmq/zmqabstractnotifier.h \
   zmq/zmqconfig.h\
   zmq/zmqnotificationinterface.h \
-  zmq/zmqpublishnotifier.h
+  zmq/zmqpublishnotifier.h \
+  blocksizecalculator.h
 
 
 obj/build.h: FORCE
@@ -209,11 +212,14 @@ libbitcoin_server_a_SOURCES = \
   rpcrawtransaction.cpp \
   rpcserver.cpp \
   script/sigcache.cpp \
+  thinblock.cpp \
   timedata.cpp \
   torcontrol.cpp \
   txdb.cpp \
   txmempool.cpp \
+  xthinblocks.cpp \
   validationinterface.cpp \
+  blocksizecalculator.cpp \
   $(BITCOIN_CORE_H)
 
 if ENABLE_ZMQ
@@ -254,6 +260,11 @@ crypto_libbitcoin_crypto_a_SOURCES = \
   crypto/hmac_sha512.h \
   crypto/ripemd160.cpp \
   crypto/ripemd160.h \
+  crypto/modified_scrypt_sha256.cpp \
+  crypto/modified_scrypt_sha256.h \
+  crypto/modified_scrypt_smix.cpp \
+  crypto/modified_scrypt_smix.h \
+  crypto/sysendian.h \
   crypto/sha1.cpp \
   crypto/sha1.h \
   crypto/sha256.cpp \
@@ -401,6 +412,8 @@ include_HEADERS = script/bitcoinconsensus.h
 libbitcoinconsensus_la_SOURCES = \
   crypto/hmac_sha512.cpp \
   crypto/ripemd160.cpp \
+  crypto/modified_scrypt_sha256.cpp \
+  crypto/modified_scrypt_smix.cpp \
   crypto/sha1.cpp \
   crypto/sha256.cpp \
   crypto/sha512.cpp \

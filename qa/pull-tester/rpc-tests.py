@@ -32,13 +32,13 @@ import re
 from tests_config import *
 
 #If imported values are not defined then set to zero (or disabled)
-if not vars().has_key('ENABLE_WALLET'):
+if 'ENABLE_WALLET' not in vars():
     ENABLE_WALLET=0
-if not vars().has_key('ENABLE_BITCOIND'):
+if 'ENABLE_BITCOIND' not in vars():
     ENABLE_BITCOIND=0
-if not vars().has_key('ENABLE_UTILS'):
+if 'ENABLE_UTILS' not in vars():
     ENABLE_UTILS=0
-if not vars().has_key('ENABLE_ZMQ'):
+if 'ENABLE_ZMQ' not in vars():
     ENABLE_ZMQ=0
 
 ENABLE_COVERAGE=0
@@ -111,6 +111,7 @@ testScripts = [
 testScriptsExt = [
     'bip65-cltv.py',
     'bip65-cltv-p2p.py',
+    'bip68-sequence.py',         # HFP0 RLT (BIP68)
     'bipdersig-p2p.py',
     'bipdersig.py',
     'getblocktemplate_longpoll.py',
@@ -118,7 +119,11 @@ testScriptsExt = [
     'txn_doublespend.py',
     'txn_clone.py --mineblock',
     'pruning.py',
-    'forknotify.py',
+# HFP0 TST, CLN begin removed forknotify
+# unknown-version check has been removed, and other CAlert::Notify uses
+# were not covered by this test.
+#    'forknotify.py',
+# HFP0 TST, CLN end
     'invalidateblock.py',
 #    'rpcbind_test.py', #temporary, bug in libevent, see #6655
     'smartfees.py',
@@ -126,8 +131,9 @@ testScriptsExt = [
     'p2p-acceptblock.py',
     'mempool_packages.py',
     'maxuploadtarget.py',
+    'hardfork_minebigblock.py',  # HFP0 TST (FRK, BSZ)
+    'hardfork_bigblocks.py',     # HFP0 TST (FRK, BSZ)
     'replace-by-fee.py',
-    'bigblocks.py',
 ]
 
 #Enable ZMQ tests

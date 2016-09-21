@@ -33,7 +33,9 @@ HelpMessageDialog::HelpMessageDialog(QWidget *parent, bool about) :
 {
     ui->setupUi(this);
 
-    QString version = tr("Bitcoin Classic") + " " + tr("version") + " " + QString::fromStdString(FormatFullVersion());
+    // HFP0 REN begin
+    QString version = tr("Bitcoin HFP0") + " " + tr("version") + " " + QString::fromStdString(FormatFullVersion());
+    // HFP0 REN end
     /* On x86 add a bit specifier to the version so that users can distinguish between
      * 32 and 64 bit builds. On other architectures, 32/64 bit may be more ambigious.
      */
@@ -45,7 +47,15 @@ HelpMessageDialog::HelpMessageDialog(QWidget *parent, bool about) :
 
     if (about)
     {
-        setWindowTitle(tr("About Bitcoin Classic"));
+        // HFP0 REN begin
+#if HFP0_POW
+        // HFP0 POW begin
+        setWindowTitle(tr("About Bitcoin HFP0-scrypt"));
+        // HFP0 POW end
+#else
+        setWindowTitle(tr("About Bitcoin HFP0-sha256"));
+#endif
+        // HFP0 REN end
 
         /// HTML-format the license message from the core
         QString licenseInfo = QString::fromStdString(LicenseInfo());
@@ -161,9 +171,11 @@ ShutdownWindow::ShutdownWindow(QWidget *parent, Qt::WindowFlags f):
     QWidget(parent, f)
 {
     QVBoxLayout *layout = new QVBoxLayout();
+    // HFP0 REN begin
     layout->addWidget(new QLabel(
-        tr("Bitcoin Classic is shutting down...") + "<br /><br />" +
+        tr("Bitcoin HFP0 is shutting down...") + "<br /><br />" +
         tr("Do not shut down the computer until this window disappears.")));
+    // HFP0 REN end
     setLayout(layout);
 }
 

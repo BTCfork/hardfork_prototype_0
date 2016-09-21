@@ -32,9 +32,11 @@ QT_TRANSLATE_NOOP("bitcoin-core", ""
 "Bind to given address to listen for JSON-RPC connections. Use [host]:port "
 "notation for IPv6. This option can be specified multiple times (default: "
 "bind to all interfaces)"),
+// HFP0 REN begin
 QT_TRANSLATE_NOOP("bitcoin-core", ""
-"Cannot obtain a lock on data directory %s. Bitcoin Classic is probably already "
+"Cannot obtain a lock on data directory %s. Bitcoin HFP0 is probably already "
 "running."),
+// HFP0 REN end
 QT_TRANSLATE_NOOP("bitcoin-core", ""
 "Create new files with system default permissions, instead of umask 077 (only "
 "effective with disabled wallet functionality)"),
@@ -145,9 +147,11 @@ QT_TRANSLATE_NOOP("bitcoin-core", ""
 QT_TRANSLATE_NOOP("bitcoin-core", ""
 "Tries to keep outbound traffic under the given target (in MiB per 24h), 0 = "
 "no limit (default: %d)"),
+// HFP0 REN begin
 QT_TRANSLATE_NOOP("bitcoin-core", ""
-"Unable to bind to %s on this computer. Bitcoin Classic is probably already "
+"Unable to bind to %s on this computer. Bitcoin HFP0 is probably already "
 "running."),
+// HFP0 REN end
 QT_TRANSLATE_NOOP("bitcoin-core", ""
 "Unsupported argument -socks found. Setting SOCKS version isn't possible "
 "anymore, only SOCKS5 proxies are supported."),

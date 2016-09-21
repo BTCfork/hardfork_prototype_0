@@ -109,7 +109,10 @@ static void potential_deadlock_detected(const std::pair<void*, void*>& mismatch,
         }
         LogPrintf(" %s\n", i.second.ToString());
     }
-    assert(onlyMaybeDeadlock);
+    // HFP0 CRY begin
+    // follow Classic dev branch: disable this assert due to too many false positives
+    //assert(onlyMaybeDeadlock);
+    // HFP0 CRY end
 }
 
 static void push_lock(void* c, const CLockLocation& locklocation, bool fTry)
@@ -120,20 +123,28 @@ static void push_lock(void* c, const CLockLocation& locklocation, bool fTry)
     dd_mutex.lock();
 
     (*lockstack).push_back(std::make_pair(c, locklocation));
-
+    // HFP0 XTB begin
+    // If this is a blocking lock operation, we want to make sure that the locking order between 2 mutexes is consistent across the program
+    // HFP0 XTB end
     if (!fTry) {
         BOOST_FOREACH (const PAIRTYPE(void*, CLockLocation) & i, (*lockstack)) {
             if (i.first == c)
                 break;
 
             std::pair<void*, void*> p1 = std::make_pair(i.first, c);
-            if (lockorders.count(p1))
+            // HFP0 XTB begin
+            if (lockorders.count(p1))  // If this order has already been placed into the order map, we've already tested it
                 continue;
+            // HFP0 XTB end
             lockorders[p1] = (*lockstack);
-
+            // HFP0 XTB begin
+            // check to see if the opposite order has ever occurred, if so flag a possible deadlock
+            // HFP0 XTB end
             std::pair<void*, void*> p2 = std::make_pair(c, i.first);
+            // HFP0 XTB begin
             if (lockorders.count(p2))
-                potential_deadlock_detected(p1, lockorders[p2], lockorders[p1]);
+                potential_deadlock_detected(p1, lockorders[p1], lockorders[p2]);
+            // HFP0 XTB end
         }
     }
     dd_mutex.unlock();

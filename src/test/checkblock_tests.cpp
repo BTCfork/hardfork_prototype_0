@@ -16,7 +16,9 @@
 #include <boost/test/unit_test.hpp>
 
 
-BOOST_FIXTURE_TEST_SUITE(CheckBlock_tests, BasicTestingSetup)
+// HFP0 CLN begin: harmonize unit test suite names w/filenames
+BOOST_FIXTURE_TEST_SUITE(checkblock_tests, BasicTestingSetup)
+// HFP0 CLN end
 
 bool read_block(const std::string& filename, CBlock& block)
 {

@@ -35,6 +35,7 @@
 #include "utilmoneystr.h"
 #include "utilstrencodings.h"
 #include "validationinterface.h"
+#include "blocksizecalculator.h"   // HFP0 BSZ added
 #ifdef ENABLE_WALLET
 #include "wallet/db.h"
 #include "wallet/wallet.h"
@@ -42,6 +43,13 @@
 #endif
 #include <stdint.h>
 #include <stdio.h>
+
+// HFP0 POW begin: safety
+#include "consensus/consensus.h"
+#ifndef HFP0_POW
+#error HFP0_POW not defined!
+#endif
+// HFP0 POW end
 
 #ifndef WIN32
 #include <signal.h>
@@ -316,7 +324,13 @@ std::string HelpMessage(HelpMessageMode mode)
     string strUsage = HelpMessageGroup(_("Options:"));
     strUsage += HelpMessageOpt("-?", _("This help message"));
     strUsage += HelpMessageOpt("-version", _("Print version and exit"));
+    // HFP0 ALR begin: disable alert system
+    // We still allow the option in configuration, but default is set to disabled,
+    // and if the user specified to enable it, we warn that the system has been disabled and won't work.
+    // This is just a courtesy to tell people to clean up their config files, and maintain as much config file
+    // compatibility with other clients as possible, initially.
     strUsage += HelpMessageOpt("-alerts", strprintf(_("Receive and display P2P network alerts (default: %u)"), DEFAULT_ALERTS));
+    // HFP0 ALR end
     strUsage += HelpMessageOpt("-alertnotify=<cmd>", _("Execute command when a relevant alert is received or we see a really long fork (%s in cmd is replaced by message)"));
     strUsage += HelpMessageOpt("-blocknotify=<cmd>", _("Execute command when the best block changes (%s in cmd is replaced by block hash)"));
     if (showDebug)
@@ -449,7 +463,9 @@ std::string HelpMessage(HelpMessageMode mode)
         strUsage += HelpMessageOpt("-limitdescendantcount=<n>", strprintf("Do not accept transactions if any ancestor would have <n> or more in-mempool descendants (default: %u)", DEFAULT_DESCENDANT_LIMIT));
         strUsage += HelpMessageOpt("-limitdescendantsize=<n>", strprintf("Do not accept transactions if any ancestor would have more than <n> kilobytes of in-mempool descendants (default: %u).", DEFAULT_DESCENDANT_SIZE_LIMIT));
     }
-    string debugCategories = "addrman, alert, bench, coindb, db, lock, rand, rpc, selectcoins, mempool, mempoolrej, net, proxy, prune, http, libevent, tor, zmq"; // Don't translate these and qt below
+    // HFP0 XTB begin: add thin as per Classic commit e532cf16f65dd195a98d020983d1ab53afaf57af
+    string debugCategories = "addrman, alert, bench, coindb, db, lock, rand, rpc, selectcoins, mempool, mempoolrej, net, proxy, prune, http, libevent, tor, zmq, thin"; // Don't translate these and qt below
+    // HFP0 XTB end
     if (mode == HMM_BITCOIN_QT)
         debugCategories += ", qt";
     strUsage += HelpMessageOpt("-debug=<category>", strprintf(_("Output debugging information (default: %u, supplying <category> is optional)"), 0) + ". " +
@@ -495,6 +511,9 @@ std::string HelpMessage(HelpMessageMode mode)
     strUsage += HelpMessageOpt("-blockminsize=<n>", strprintf(_("Set minimum block size in bytes (default: %u)"), DEFAULT_BLOCK_MIN_SIZE));
     strUsage += HelpMessageOpt("-blockmaxsize=<n>", strprintf(_("Set maximum block size in bytes (default: %d)"), DEFAULT_BLOCK_MAX_SIZE));
     strUsage += HelpMessageOpt("-blockprioritysize=<n>", strprintf(_("Set maximum size of high-priority/low-fee transactions in bytes (default: %d)"), DEFAULT_BLOCK_PRIORITY_SIZE));
+    // HFP0 BSZ begin
+    strUsage += HelpMessageOpt("-scaleblocksizeoptions=<n>", strprintf(_("Adaptively scale block size options (max, min, priority) (default: %d)"), DEFAULT_SCALE_BLOCK_SIZE_OPTIONS));
+    // HFP0 BSZ end
     if (showDebug)
         strUsage += HelpMessageOpt("-blockversion=<n>", strprintf("Override block version to test forking scenarios (default: %d)", (int)CBlock::CURRENT_VERSION));
 
@@ -519,8 +538,13 @@ std::string HelpMessage(HelpMessageMode mode)
 
 std::string LicenseInfo()
 {
+    // HFP0 REN begin: include Classic + us
     // todo: remove urls from translations on next change
     return FormatParagraph(strprintf(_("Copyright (C) 2009-%i The Bitcoin Core Developers"), COPYRIGHT_YEAR)) + "\n" +
+           "\n" +
+           FormatParagraph(strprintf(_("Copyright (C) %i The Bitcoin Classic Developers"), COPYRIGHT_YEAR)) + "\n" +
+           "\n" +
+           FormatParagraph(strprintf(_("Copyright (C) %i Bitcoin Developers"), COPYRIGHT_YEAR)) + "\n" +
            "\n" +
            FormatParagraph(_("This is experimental software.")) + "\n" +
            "\n" +
@@ -528,6 +552,7 @@ std::string LicenseInfo()
            "\n" +
            FormatParagraph(_("This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit <https://www.openssl.org/> and cryptographic software written by Eric Young and UPnP software written by Thomas Bernard.")) +
            "\n";
+    // HFP0 REN end
 }
 
 static void BlockNotifyCallback(bool initialSync, const CBlockIndex *pBlockIndex)
@@ -1021,6 +1046,12 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     nMaxDatacarrierBytes = GetArg("-datacarriersize", nMaxDatacarrierBytes);
 
     fAlerts = GetBoolArg("-alerts", DEFAULT_ALERTS);
+    // HFP0 ALR begin: disable alert system.
+    if (fAlerts) {
+        InitWarning(_("The -alerts option is obsolete in HFP0. Consider removing the parameter from your configuration."));
+        fAlerts = false;    // for safety - override and disable it
+    }
+    // HFP0 ALR end
 
     // Option to startup with mocktime set (used for regression testing):
     SetMockTime(GetArg("-mocktime", 0)); // SetMockTime(0) is a no-op
@@ -1044,8 +1075,11 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     globalVerifyHandle.reset(new ECCVerifyHandle());
 
     // Sanity check
-    if (!InitSanityCheck())
-        return InitError(_("Initialization sanity check failed. Bitcoin Classic is shutting down."));
+    if (!InitSanityCheck()) {
+        // HFP0 REN begin
+        return InitError(_("Initialization sanity check failed. Bitcoin HFP0 is shutting down."));
+        // HFP0 REN end
+    }
 
     std::string strDataDir = GetDataDir().string();
 #ifdef ENABLE_WALLET
@@ -1060,10 +1094,15 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
 
     try {
         static boost::interprocess::file_lock lock(pathLockFile.string().c_str());
-        if (!lock.try_lock())
-            return InitError(strprintf(_("Cannot obtain a lock on data directory %s. Bitcoin Classic is probably already running."), strDataDir));
+        if (!lock.try_lock()) {
+            // HFP0 REN begin
+            return InitError(strprintf(_("Cannot obtain a lock on data directory %s. Bitcoin HFP0 is probably already running."), strDataDir));
+            // HFP0 REN end
+        }
     } catch(const boost::interprocess::interprocess_exception& e) {
-        return InitError(strprintf(_("Cannot obtain a lock on data directory %s. Bitcoin Classic is probably already running.") + " %s.", strDataDir, e.what()));
+        // HFP0 REN begin
+        return InitError(strprintf(_("Cannot obtain a lock on data directory %s. Bitcoin HFP0 is probably already running.") + " %s.", strDataDir, e.what()));
+        // HFP0 REN end
     }
 
 #ifndef WIN32
@@ -1475,11 +1514,16 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
                 InitWarning(_("Error reading wallet.dat! All keys read correctly, but transaction data"
                              " or address book entries might be missing or incorrect."));
             }
-            else if (nLoadWalletRet == DB_TOO_NEW)
-                strErrors << _("Error loading wallet.dat: Wallet requires newer version of Bitcoin Classic") << "\n";
+            else if (nLoadWalletRet == DB_TOO_NEW) {
+                // HFP0 REN begin
+                strErrors << _("Error loading wallet.dat: Wallet requires newer version of Bitcoin HFP0") << "\n";
+                // HFP0 REN end
+            }
             else if (nLoadWalletRet == DB_NEED_REWRITE)
             {
-                strErrors << _("Wallet needed to be rewritten: restart Bitcoin Classic to complete") << "\n";
+                // HFP0 REN begin
+                strErrors << _("Wallet needed to be rewritten: restart Bitcoin HFP0 to complete") << "\n";
+                // HFP0 REN end
                 LogPrintf("%s", strErrors.str());
                 return InitError(strErrors.str());
             }
@@ -1625,6 +1669,25 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
         while (!fRequestShutdown && chainActive.Tip() == NULL)
             MilliSleep(10);
     }
+    else {
+        // HFP0 BSZ begin
+        if (chainActive.Height() > Params().GetConsensus().nHFP0ActivateSizeForkHeight) {
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: ChainActive.Tip() != NULL after init step 10\n");
+            // HFP0 DBG end
+#endif
+            UpdateAdaptiveBlockSizeVars(chainActive.Tip());
+#if HFP0_DEBUG_BSZ
+            // HFP0 DBG begin
+            LogPrintf("HFP0 BSZ: CreateNewBlock raw: maxBlockSize = ComputeBlockSize() = %u\n", maxBlockSize);
+            LogPrintf("HFP0 BSZ: CreateNewBlock raw: maxBlockSigops = %u at address %p\n", maxBlockSigops, &maxBlockSigops);
+            LogPrintf("HFP0 BSZ: CreateNewBlock raw: maxStandardTxSigops = %u\n", maxStandardTxSigops);
+            // HFP0 DBG end
+#endif
+        }
+        // HFP0 BSZ end
+    }
 
     // ********************************************************* Step 11: start node
 
@@ -1644,6 +1707,18 @@ bool AppInit2(boost::thread_group& threadGroup, CScheduler& scheduler)
     LogPrintf("mapWallet.size() = %u\n",       pwalletMain ? pwalletMain->mapWallet.size() : 0);
     LogPrintf("mapAddressBook.size() = %u\n",  pwalletMain ? pwalletMain->mapAddressBook.size() : 0);
 #endif
+// HFP0 POW begin
+// identify whether this is a POW-changing build or not
+#if HFP0_POW
+    // HFP0 DBG begin
+    LogPrintf("HFP0 POW: Modified proof-of-work takes effect after hard fork\n");
+    // HFP0 DBG end
+#else
+    // HFP0 DBG begin
+    LogPrintf("HFP0 POW: Retaining SHA256 proof-of-work after hard fork\n");
+    // HFP0 DBG end
+#endif
+// HFP0 POW end
 
     if (GetBoolArg("-listenonion", DEFAULT_LISTEN_ONION))
         StartTorControl(threadGroup, scheduler);

@@ -41,9 +41,13 @@ class CValidationInterface;
 class CValidationState;
 
 struct CNodeStateStats;
+struct LockPoints;       // HFP0 CSV (BIP112) added
 
 /** Default for accepting alerts from the P2P network. */
-static const bool DEFAULT_ALERTS = true;
+/** HFP0 ALR begin: disable alert system
+    (set default to off, still handle the option, but warn the user that it cannot be enabled) */
+static const bool DEFAULT_ALERTS = false;
+/** HFP0 ALR end */
 /** Default for DEFAULT_WHITELISTRELAY. */
 static const bool DEFAULT_WHITELISTRELAY = true;
 /** Default for DEFAULT_WHITELISTFORCERELAY. */
@@ -51,7 +55,9 @@ static const bool DEFAULT_WHITELISTFORCERELAY = true;
 /** Default for -minrelaytxfee, minimum relay fee for transactions */
 static const unsigned int DEFAULT_MIN_RELAY_TX_FEE = 1000;
 /** Default for -maxorphantx, maximum number of orphan transactions kept in memory */
-static const unsigned int DEFAULT_MAX_ORPHAN_TRANSACTIONS = 100;
+// HFP0 XTB begin
+static const unsigned int DEFAULT_MAX_ORPHAN_TRANSACTIONS = 5000;  // BU Xtreme Thinblocks change to 5000 or 25MB (5000 x 5000KB max orphan size)
+// HFP0 XTB end
 /** Default for -limitancestorcount, max number of in-mempool ancestors */
 static const unsigned int DEFAULT_ANCESTOR_LIMIT = 25;
 /** Default for -limitancestorsize, maximum kilobytes of tx + all in-mempool ancestors */
@@ -124,6 +130,7 @@ struct BlockHasher
 extern CScript COINBASE_FLAGS;
 extern CCriticalSection cs_main;
 extern CTxMemPool mempool;
+// HFP0 TODO: remove sizeForkTime unless used
 extern boost::atomic<uint32_t> sizeForkTime;
 typedef boost::unordered_map<uint256, CBlockIndex*, BlockHasher> BlockMap;
 extern BlockMap mapBlockIndex;
@@ -145,6 +152,21 @@ extern size_t nCoinCacheUsage;
 extern CFeeRate minRelayTxFee;
 extern bool fAlerts;
 extern bool fEnableReplacement;
+// HFP0 XTB begin
+// Xpress Validation: begin section
+/**
+ * Transactions that have already been accepted into the memory pool do not need to be
+ * re-verified and can avoid having to do a second and expensive CheckInputs() when
+ * processing a new block.  (Protected by cs_main)
+ */
+static std::set<uint256> setPreVerifiedTxHash;
+/**
+ * Orphans that are added to the thinblock must be verifed since they have never been
+ *  accepted into the memory pool.
+ */
+static std::set<uint256> setUnVerifiedOrphanTxHash;
+// BU - Xpress Validation: end section
+// HFP0 XTB end
 
 /** Best header we've seen so far (used for getheaders queries' starting points). */
 extern CBlockIndex *pindexBestHeader;
@@ -180,11 +202,11 @@ void RegisterNodeSignals(CNodeSignals& nodeSignals);
 /** Unregister a network node */
 void UnregisterNodeSignals(CNodeSignals& nodeSignals);
 
-/** 
+/**
  * Process an incoming block. This only returns after the best known valid
  * block is made active. Note that it does not, however, guarantee that the
  * specific block passed to it has been checked for validity!
- * 
+ *
  * @param[out]  state   This may be set to an Error state if any error occurred processing it, including during validation/connection/etc of otherwise unrelated blocks during reorganisation; or it may be set to an Invalid state if pblock is itself invalid (but this is not guaranteed even when the block is checked). If you want to *possibly* get feedback on whether pblock is valid, you must also install a CValidationInterface (see validationinterface.h) - this will have its BlockChecked method called whenever *any* block completes validation.
  * @param[in]   pfrom   The node which we are receiving the block from; it is added to mapBlockSource and may be penalised if the block is invalid.
  * @param[in]   pblock  The block we want to process.
@@ -310,7 +332,7 @@ struct CDiskTxPos : public CDiskBlockPos
 };
 
 
-/** 
+/**
  * Count ECDSA signature operations the old-fashioned (pre-0.6) way
  * @return number of sigops this transaction's outputs will produce when spent
  * @see CTransaction::FetchInputs
@@ -319,7 +341,7 @@ unsigned int GetLegacySigOpCount(const CTransaction& tx);
 
 /**
  * Count ECDSA signature operations in pay-to-script-hash inputs.
- * 
+ *
  * @param[in] mapInputs Map of previous transactions that have outputs we're spending
  * @return maximum number of sigops required to validate this transaction's inputs
  * @see CTransaction::FetchInputs
@@ -356,6 +378,14 @@ bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime);
  * See consensus/consensus.h for flag definitions.
  */
 bool CheckFinalTx(const CTransaction &tx, int flags = -1);
+
+// HFP0 CSV (BIP112) begin
+/**
+ * Test whether the LockPoints height and time are still valid on the
+ * current chain
+ */
+bool TestLockPointValidity(const LockPoints* lp);
+// HFP0 CSV (BIP112) end
 
 /**
  * Class that keeps track of number of signature operations
@@ -395,9 +425,32 @@ public:
     }
 };
 
-/** 
+// HFP0 RLT (BIP68) begin
+/**
+ * Check if transaction is final per BIP 68 sequence numbers and can be included in a block.
+ * Consensus critical. Takes as input a list of heights at which tx's inputs (in order) confirmed.
+ */
+bool SequenceLocks(const CTransaction &tx, int flags, std::vector<int>* prevHeights, const CBlockIndex& block);
+
+/**
+ * Check if transaction will be BIP 68 final in the next block to be created.
+ *
+ * Simulates calling SequenceLocks() with data from the tip of the current active chain.
+ * Optionally stores in LockPoints the resulting height and time calculated and the hash
+ * of the block needed for calculation or skips the calculation and uses the LockPoints
+ * passed in for evaluation.
+ * The LockPoints should not be considered valid if CheckSequenceLocks returns false.
+ *
+ * See consensus/consensus.h for flag definitions.
+ */
+// HFP0 CSV (BIP112) begin: added lock points
+bool CheckSequenceLocks(const CTransaction &tx, int flags, LockPoints* lp = NULL, bool useExistingLockPoints = false);
+// HFP0 CSV (BIP112) end
+// HFP0 RLT (BIP68) end
+
+/**
  * Closure representing one script verification
- * Note that this stores references to the spending transaction 
+ * Note that this stores references to the spending transaction
  */
 class CScriptCheck
 {
@@ -558,16 +611,26 @@ static const unsigned int REJECT_HIGHFEE = 0x100;
 static const unsigned int REJECT_ALREADY_KNOWN = 0x101;
 /** Transaction conflicts with a transaction already known */
 static const unsigned int REJECT_CONFLICT = 0x102;
+// HFP0 BSZ begin: change these functions to take height instead of time
 /** Maximum size of a block */
-unsigned int MaxBlockSize(uint32_t nBlockTime);
+unsigned int MaxBlockSize(uint32_t nHeight);
 
 /** Max accurately-counted sigops in a block */
-uint32_t MaxBlockSigops(uint32_t nBlockTime);
+uint32_t MaxBlockSigops(uint32_t nHeight);
 
 /** Max accurately-counted bytes hashed to compute signatures, per block */
-uint32_t MaxBlockSighash(uint32_t nBlockTime);
+uint32_t MaxBlockSighash(uint32_t nHeight);
 
 /** Maximum number of legacy sigops in a block */
-uint32_t MaxLegacySigops(uint32_t nBlockTime);
+uint32_t MaxLegacySigops(uint32_t nHeight);
+// HFP0 BSZ end
+
+// HFP0 BSZ begin
+// inline function to factor out multiple instances where global vars
+// need to be updated after adaptive blocksize recomputation.
+// Used in init.cpp and miner.cpp, made extern due to otherwise
+// undefined reference using GCC 4.9.
+extern void UpdateAdaptiveBlockSizeVars(CBlockIndex* pindexPrev);
+// HFP0 BSZ end
 
 #endif // BITCOIN_MAIN_H

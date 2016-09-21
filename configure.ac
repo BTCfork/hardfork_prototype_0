@@ -6,7 +6,7 @@ define(_CLIENT_VERSION_REVISION, 0)
 define(_CLIENT_VERSION_BUILD, 0)
 define(_CLIENT_VERSION_IS_RELEASE, true)
 define(_COPYRIGHT_YEAR, 2016)
-AC_INIT([Bitcoin Classic],[_CLIENT_VERSION_MAJOR._CLIENT_VERSION_MINOR._CLIENT_VERSION_REVISION],[https://github.com/bitcoinclassic/bitcoinclassic/issues],[bitcoin])
+AC_INIT([Bitcoin HFP0],[_CLIENT_VERSION_MAJOR._CLIENT_VERSION_MINOR._CLIENT_VERSION_REVISION],[https://github.com/BTCfork/hardfork_prototype_0/issues],[bitcoin])
 AC_CONFIG_SRCDIR([src/main.cpp])
 AC_CONFIG_HEADERS([src/config/bitcoin-config.h])
 AC_CONFIG_AUX_DIR([build-aux])
@@ -76,6 +76,13 @@ AC_ARG_ENABLE([wallet],
   [disable wallet (enabled by default)])],
   [enable_wallet=$enableval],
   [enable_wallet=yes])
+
+# Enable HFP0 POW
+AC_ARG_ENABLE([newpow],
+  [AS_HELP_STRING([--disable-newpow],
+  [disable new POW (enabled by default)])],
+  [enable_newpow=$enableval],
+  [enable_newpow=yes])
 
 AC_ARG_WITH([miniupnpc],
   [AS_HELP_STRING([--with-miniupnpc],
@@ -804,6 +811,16 @@ else
   AC_MSG_RESULT(no)
 fi
 
+dnl use HFP0 changed POW
+AC_MSG_CHECKING([if POW should be changed])
+if test x$enable_newpow != xno; then
+  AC_MSG_RESULT(yes)
+  AC_DEFINE_UNQUOTED([HFP0_POW],[1],[Define to 1 to use new scrypt-based POW])
+
+else
+  AC_MSG_RESULT(no)
+fi
+
 dnl enable upnp support
 AC_MSG_CHECKING([whether to build with support for UPnP])
 if test x$have_miniupnpc = xno; then
@@ -897,6 +914,7 @@ AM_CONDITIONAL([BUILD_DARWIN], [test x$BUILD_OS = xdarwin])
 AM_CONDITIONAL([TARGET_WINDOWS], [test x$TARGET_OS = xwindows])
 AM_CONDITIONAL([ENABLE_WALLET],[test x$enable_wallet = xyes])
 AM_CONDITIONAL([ENABLE_TESTS],[test x$use_tests = xyes])
+AM_CONDITIONAL([HFP0_POW],[test x$enable_newpow = xyes])
 AM_CONDITIONAL([ENABLE_QT],[test x$bitcoin_enable_qt = xyes])
 AM_CONDITIONAL([ENABLE_QT_TESTS],[test x$use_tests$bitcoin_enable_qt_test = xyesyes])
 AM_CONDITIONAL([ENABLE_BENCH],[test x$use_bench = xyes])

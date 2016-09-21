@@ -137,6 +137,30 @@ extern const char *HEADERS;
  * @see https://bitcoin.org/en/developer-reference#block
  */
 extern const char *BLOCK;
+
+// HFP0 XTB begin
+/**
+ * The thinblock message transmits a single serialized thinblock.
+ */
+extern const char *THINBLOCK;
+/**
+ * The xthinblock message transmits a single serializexd xthinblock.
+ */
+extern const char *XTHINBLOCK;
+/**
+ * The xblocktx message transmits a single serialized xblocktx.
+ */
+extern const char *XBLOCKTX;
+/**
+ * The get_xblocktx message transmits a single serialized get_xblocktx.
+ */
+extern const char *GET_XBLOCKTX;
+/**
+ * The get_xthin message transmits a single serialized get_xthin.
+ */
+extern const char *GET_XTHIN;
+// HFP0 XTB end
+
 /**
  * The getaddr message requests an addr message from the receiving node,
  * preferably one with lots of IP addresses of other receiving nodes.
@@ -227,17 +251,24 @@ const std::vector<std::string> &getAllNetMessageTypes();
 /** nServices flags */
 enum {
     // NODE_NETWORK means that the node is capable of serving the block chain. It is currently
-    // set by all Bitcoin Classic nodes, and is unset by SPV clients or other peers that just want
+    // set by all HFP0 nodes, and is unset by SPV clients or other peers that just want
     // network services but don't provide them.
     NODE_NETWORK = (1 << 0),
     // NODE_GETUTXO means the node is capable of responding to the getutxo protocol request.
-    // Bitcoin Classic does not support this but a patch set called Bitcoin XT does.
+    // HFP0 does not support this but Bitcoin XT does.
     // See BIP 64 for details on how this is implemented.
     NODE_GETUTXO = (1 << 1),
     // NODE_BLOOM means the node is capable and willing to handle bloom-filtered connections.
     // Bitcoin Core nodes used to support this by default, without advertising this bit,
     // but no longer do as of protocol version 70011 (= NO_BLOOM_VERSION)
     NODE_BLOOM = (1 << 2),
+
+    // HFP0 XTB begin
+    // NODE_XTHIN means the node supports Xtreme Thinblocks
+    // If this is turned off then the node will not service xthin requests nor
+    // make xthin requests
+    NODE_XTHIN = (1 << 4),
+    // HFP0 XTB end
 
     // Bits 24-31 are reserved for temporary experiments. Just pick a bit that
     // isn't getting used, or one not being used much, and notify the
@@ -316,6 +347,14 @@ enum {
     // Nodes may always request a MSG_FILTERED_BLOCK in a getdata, however,
     // MSG_FILTERED_BLOCK should not appear in any invs except as a part of getdata.
     MSG_FILTERED_BLOCK,
+    // HFP0 XTB begin
+    // BUIP010 Xtreme Thinblocks: a thin block contains all the transactions hashes in a block
+    // and also provides the missing transactions that are needed at the other end to reconstruct the block
+    MSG_THINBLOCK,
+    // BUIP010 Xtreme Thinblocks: an Xtreme thin block contains the first 8 bytes of all the tx hashes
+    // and also provides the missing transactions that are needed at the other end to reconstruct the block
+    MSG_XTHINBLOCK,
+    // HFP0 XTB end
 };
 
 #endif // BITCOIN_PROTOCOL_H

@@ -10,10 +10,25 @@
 #include "serialize.h"
 #include "uint256.h"
 
+#include "consensus/consensus.h"   // HFP0 POW added for conditional compilation flag
+
+// HFP0 POW begin: safety
+#include "consensus/consensus.h"
+#ifndef HFP0_POW
+#error HFP0_POW not defined!
+#endif
+// HFP0 POW end
+
 const uint32_t BIP_009_MASK = 0x20000000;
 const uint32_t BASE_VERSION = 0x20000000;  // Will accept 2MB blocks
 const uint32_t FORK_BIT_2MB = 0x10000000;  // Vote for 2MB fork
-const bool DEFAULT_2MB_VOTE = false;
+// HFP0 removed Classic DEFAULT_2MB_VOTE
+
+// HFP0 FRK begin
+const uint32_t FULL_FORK_VERSION_MIN = 0x543210; // HFP0 starting version
+const uint32_t FULL_FORK_VERSION_MAX = FULL_FORK_VERSION_MIN + 15; // HFP0 end of version range, so that others can fork safely
+const uint32_t FULL_FORK_VERSION_CUR = FULL_FORK_VERSION_MIN;
+// HFP0 FRK end
 
 /** Nodes collect new transactions into a block, hash them into a hash tree,
  * and scan through nonce values to make the block's hash satisfy proof-of-work
@@ -68,7 +83,13 @@ public:
         return (nBits == 0);
     }
 
+#if HFP0_POW
+// HFP0 POW begin
+    uint256 GetHash(bool UseCache = true) const;
+// HFP0 POW end
+#else
     uint256 GetHash() const;
+#endif
 
     int64_t GetBlockTime() const
     {

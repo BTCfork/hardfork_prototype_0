@@ -22,10 +22,10 @@ using namespace std;
 CTxMemPoolEntry::CTxMemPoolEntry(const CTransaction& _tx, const CAmount& _nFee,
                                  int64_t _nTime, double _entryPriority, unsigned int _entryHeight,
                                  bool poolHasNoInputsOf, CAmount _inChainInputValue,
-                                 bool _spendsCoinbase, unsigned int _sigOps):
+                                 bool _spendsCoinbase, unsigned int _sigOps, LockPoints lp):   // HFP0 CSV (BIP112) added lp
     tx(_tx), nFee(_nFee), nTime(_nTime), entryPriority(_entryPriority), entryHeight(_entryHeight),
     hadNoDependencies(poolHasNoInputsOf), inChainInputValue(_inChainInputValue),
-    spendsCoinbase(_spendsCoinbase), sigOpCount(_sigOps)
+    spendsCoinbase(_spendsCoinbase), sigOpCount(_sigOps), lockPoints(lp)   // HFP0 CSV (BIP112) added lock points
 {
     nTxSize = ::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION);
     nModSize = tx.CalculateModifiedSize(nTxSize);
@@ -60,6 +60,13 @@ void CTxMemPoolEntry::UpdateFeeDelta(int64_t newFeeDelta)
     nModFeesWithDescendants += newFeeDelta - feeDelta;
     feeDelta = newFeeDelta;
 }
+
+// HFP0 CSV (BIP112) begin
+void CTxMemPoolEntry::UpdateLockPoints(const LockPoints& lp)
+{
+    lockPoints = lp;
+}
+// HFP0 CSV (BIP112) end
 
 // Update the given tx for any in-mempool descendants.
 // Assumes that setMemPoolChildren is correct for the given tx and all
@@ -506,7 +513,15 @@ void CTxMemPool::removeForReorg(const CCoinsViewCache *pcoins, unsigned int nMem
     list<CTransaction> transactionsToRemove;
     for (indexed_transaction_set::const_iterator it = mapTx.begin(); it != mapTx.end(); it++) {
         const CTransaction& tx = it->GetTx();
-        if (!CheckFinalTx(tx, flags)) {
+        // HFP0 RLT (BIP68) begin
+        // HFP0 CSV (BIP112) begin: add lock points
+        LockPoints lp = it->GetLockPoints();
+        bool validLP =  TestLockPointValidity(&lp);
+        if (!CheckFinalTx(tx, flags) || !CheckSequenceLocks(tx, flags, &lp, validLP)) {
+            // Note if CheckSequenceLocks fails the LockPoints may still be invalid
+            // So it's critical that we remove the tx and not depend on the LockPoints.
+        // HFP0 CSV (BIP112) end
+        // HFP0 RLT (BIP68) end
             transactionsToRemove.push_back(tx);
         } else if (it->GetSpendsCoinbase()) {
             BOOST_FOREACH(const CTxIn& txin, tx.vin) {
@@ -521,6 +536,11 @@ void CTxMemPool::removeForReorg(const CCoinsViewCache *pcoins, unsigned int nMem
                 }
             }
         }
+        // HFP0 CSV (BIP112) begin
+        if (!validLP) {
+            mapTx.modify(it, update_lock_points(lp));
+        }
+        // HFP0 CSV (BIP112) end
     }
     BOOST_FOREACH(const CTransaction& tx, transactionsToRemove) {
         list<CTransaction> removed;

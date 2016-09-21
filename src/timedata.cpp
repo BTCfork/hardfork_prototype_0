@@ -99,7 +99,9 @@ void AddTimeData(const CNetAddr& ip, int64_t nOffsetSample)
                 if (!fMatch)
                 {
                     fDone = true;
-                    string strMessage = _("Please check that your computer's date and time are correct! If your clock is wrong Bitcoin Classic will not work properly.");
+                    // HFP0 REN begin
+                    string strMessage = _("Please check that your computer's date and time are correct! If your clock is wrong Bitcoin HFP0 will not work properly.");
+                    // HFP0 REN end
                     strMiscWarning = strMessage;
                     uiInterface.ThreadSafeMessageBox(strMessage, "", CClientUIInterface::MSG_WARNING);
                 }

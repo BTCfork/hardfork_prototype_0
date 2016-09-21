@@ -606,6 +606,7 @@ static UniValue SoftForkDesc(const std::string &name, int version, CBlockIndex* 
     return rv;
 }
 
+// HFP0 TODO: add HFP0 hardfork descriptive information
 static UniValue HardForkMajorityDesc(int minVersion, CBlockIndex* pindex, int nRequired, const Consensus::Params& consensusParams)
 {
     uint32_t forkTime = sizeForkTime.load();
@@ -639,6 +640,7 @@ static UniValue HardForkMajorityDesc(int minVersion, CBlockIndex* pindex, int nR
     return rv;
 }
 
+// HFP0 TODO: add hardfork descriptive information
 static UniValue HardForkDesc(const std::string &name, int version, CBlockIndex* pindex, const Consensus::Params& consensusParams)
 {
     UniValue rv(UniValue::VOBJ);
@@ -720,6 +722,7 @@ UniValue getblockchaininfo(const UniValue& params, bool fHelp)
     softforks.push_back(SoftForkDesc("bip65", 4, tip, consensusParams));
     obj.push_back(Pair("softforks",             softforks));
 
+    // HFP0 TODO: add HFP0 hardfork descriptive information
     UniValue hardforks(UniValue::VARR);
     hardforks.push_back(HardForkDesc("bip109", 0x01000000, tip, consensusParams));
     obj.push_back(Pair("hardforks", hardforks));

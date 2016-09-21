@@ -113,7 +113,9 @@ struct ReadAlerts : public TestingSetup
     std::vector<CAlert> alerts;
 };
 
-BOOST_FIXTURE_TEST_SUITE(Alert_tests, ReadAlerts)
+// HFP0 CLN begin: harmonize unit test suite names w/filenames
+BOOST_FIXTURE_TEST_SUITE(alert_tests, ReadAlerts)
+// HFP0 CLN end
 
 
 BOOST_AUTO_TEST_CASE(AlertApplies)

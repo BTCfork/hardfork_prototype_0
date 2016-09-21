@@ -14,6 +14,15 @@
 #include "httprpc.h"
 #include "rpcserver.h"
 
+// HFP0 POW begin: safety
+#ifndef HFP0_POW
+#error HFP0_POW not defined!
+#endif
+// HFP0 POW end
+#if HFP0_POW
+#include "miner.h"  // HFP0 POW added to improve miner shutdown as per satoshisbitcoin
+#endif
+
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/thread.hpp>
@@ -49,8 +58,31 @@ void WaitForShutdown(boost::thread_group* threadGroup)
     }
     if (threadGroup)
     {
+#if HFP0_POW
+#if HFP0_DEBUG_POW
+        // HFP0 DBG begin
+        fprintf(stdout, "HFP0 POW: Bitcoin server stopping\n");
+        // HFP0 DBG end
+#endif
+        SetShutdownAllMinerThreads();
+#if HFP0_DEBUG_POW
+        // HFP0 DBG begin
+        fprintf(stdout, "  HFP0 POW: Miner threads interrupted\n");
+        // HFP0 DBG end
+#endif
+#endif
         Interrupt(*threadGroup);
+#if HFP0_POW && HFP0_DEBUG_POW
+        // HFP0 DBG begin
+        fprintf(stdout, "  HFP0 POW: All standard threads interrupted\n");
+        // HFP0 DBG end
+#endif
         threadGroup->join_all();
+#if HFP0_POW && HFP0_DEBUG_POW
+        // HFP0 DBG begin
+        fprintf(stdout, "  HFP0 POW: All standard threads joined\n");
+        // HFP0 DBG end
+#endif
     }
 }
 
@@ -74,7 +106,9 @@ bool AppInit(int argc, char* argv[])
     // Process help and version before taking care about datadir
     if (mapArgs.count("-?") || mapArgs.count("-h") ||  mapArgs.count("-help") || mapArgs.count("-version"))
     {
-        std::string strUsage = _("Bitcoin Classic Daemon") + " " + _("version") + " " + FormatFullVersion() + "\n";
+        // HFP0 REN begin
+        std::string strUsage = _("Bitcoin HFP0 Daemon") + " " + _("version") + " " + FormatFullVersion() + "\n";
+        // HFP0 REN end
 
         if (mapArgs.count("-version"))
         {
@@ -82,8 +116,10 @@ bool AppInit(int argc, char* argv[])
         }
         else
         {
+            // HFP0 REN begin
             strUsage += "\n" + _("Usage:") + "\n" +
-                  "  bitcoind [options]                     " + _("Start Bitcoin Classic Daemon") + "\n";
+                  "  bitcoind [options]                     " + _("Start Bitcoin HFP0 Daemon") + "\n";
+            // HFP0 REN end
 
             strUsage += "\n" + HelpMessage(HMM_BITCOIND);
         }

@@ -19,6 +19,7 @@
 #include "boost/multi_index/ordered_index.hpp"
 
 class CAutoFile;
+class CBlockIndex;   // HFP0 CSV (BIP112) added
 
 inline double AllowFreeThreshold()
 {
@@ -34,6 +35,23 @@ inline bool AllowFree(double dPriority)
 
 /** Fake height value used in CCoins to signify they are only in the memory pool (since 0.8) */
 static const unsigned int MEMPOOL_HEIGHT = 0x7FFFFFFF;
+
+// HFP0 CSV (BIP112) begin
+struct LockPoints
+{
+    // Will be set to the blockchain height and median time past
+    // values that would be necessary to satisfy all relative locktime
+    // constraints (BIP68) of this tx given our view of block chain history
+    int height;
+    int64_t time;
+    // As long as the current chain descends from the highest height block
+    // containing one of the inputs used in the calculation, then the cached
+    // values are still valid even after a reorg.
+    CBlockIndex* maxInputBlock;
+
+    LockPoints() : height(0), time(0), maxInputBlock(NULL) { }
+};
+// HFP0 CSV (BIP112) end
 
 class CTxMemPool;
 
@@ -70,6 +88,9 @@ private:
     bool spendsCoinbase; //! keep track of transactions that spend a coinbase
     unsigned int sigOpCount; //! Legacy sig ops plus P2SH sig op count
     int64_t feeDelta; //! Used for determining the priority of the transaction for mining in a block
+    // HFP0 CSV (BIP112) begin: added lockpoints
+    LockPoints lockPoints; //! Track the height and time at which tx was final
+    // HFP0 CSV (BIP112) end
 
     // Information about descendants of this transaction that are in the
     // mempool; if we remove this transaction we must remove all of these
@@ -84,7 +105,7 @@ public:
     CTxMemPoolEntry(const CTransaction& _tx, const CAmount& _nFee,
                     int64_t _nTime, double _entryPriority, unsigned int _entryHeight,
                     bool poolHasNoInputsOf, CAmount _inChainInputValue, bool spendsCoinbase,
-                    unsigned int nSigOps);
+                    unsigned int nSigOps, LockPoints lp);  // HFP0 CSV (BIP112) added lock points
     CTxMemPoolEntry(const CTxMemPoolEntry& other);
 
     const CTransaction& GetTx() const { return this->tx; }
@@ -101,12 +122,17 @@ public:
     unsigned int GetSigOpCount() const { return sigOpCount; }
     int64_t GetModifiedFee() const { return nFee + feeDelta; }
     size_t DynamicMemoryUsage() const { return nUsageSize; }
+    const LockPoints& GetLockPoints() const { return lockPoints; } // HFP0 CSV (BIP112) added
 
     // Adjusts the descendant state, if this entry is not dirty.
     void UpdateState(int64_t modifySize, CAmount modifyFee, int64_t modifyCount);
     // Updates the fee delta used for mining priority score, and the
     // modified fees with descendants.
     void UpdateFeeDelta(int64_t feeDelta);
+    // HFP0 CSV (BIP112) begin
+    // Update the LockPoints after a reorg
+    void UpdateLockPoints(const LockPoints& lp);
+    // HFP0 CSV (BIP112) end
 
     /** We can set the entry to be dirty if doing the full calculation of in-
      *  mempool descendants will be too expensive, which can potentially happen
@@ -153,6 +179,18 @@ struct update_fee_delta
 private:
     int64_t feeDelta;
 };
+
+// HFP0 CSV (BIP112) begin
+struct update_lock_points
+{
+    update_lock_points(const LockPoints& _lp) : lp(_lp) { }
+
+    void operator() (CTxMemPoolEntry &e) { e.UpdateLockPoints(lp); }
+
+private:
+    const LockPoints& lp;
+};
+// HFP0 CSV (BIP112) end
 
 // extracts a TxMemPoolEntry's transaction hash
 struct mempoolentry_txid

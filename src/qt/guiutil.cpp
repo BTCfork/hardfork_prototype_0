@@ -909,6 +909,11 @@ QString formatServicesStr(quint64 mask)
             case NODE_BLOOM:
                 strList.append("BLOOM");
                 break;
+            // HFP0 XTB begin
+            case NODE_XTHIN:
+                strList.append("XTHIN");
+                break;
+            // HFP0 XTB end
             default:
                 strList.append(QString("%1[%2]").arg("UNKNOWN").arg(check));
             }

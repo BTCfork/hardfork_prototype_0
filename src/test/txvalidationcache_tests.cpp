@@ -15,7 +15,9 @@
 
 #include <boost/test/unit_test.hpp>
 
-BOOST_AUTO_TEST_SUITE(tx_validationcache_tests)
+// HFP0 CLN begin: harmonize unit test suite names w/filenames
+BOOST_AUTO_TEST_SUITE(txvalidationcache_tests)
+// HFP0 CLN end
 
 static bool
 ToMemPool(CMutableTransaction& tx)

@@ -91,7 +91,9 @@ static void InitMessage(const std::string &message)
  */
 static std::string Translate(const char* psz)
 {
-    return QCoreApplication::translate("bitcoin-classic", psz).toStdString();
+    // HFP0 REN begin
+    return QCoreApplication::translate("bitcoin-hfp0", psz).toStdString();
+    // HFP0 REN end
 }
 
 static QString GetLangTerritory()
@@ -163,7 +165,7 @@ void DebugMessageHandler(QtMsgType type, const QMessageLogContext& context, cons
 }
 #endif
 
-/** Class encapsulating Bitcoin Classic startup and shutdown.
+/** Class encapsulating Bitcoin HFP0 startup and shutdown.
  * Allows running startup and shutdown in a different thread from the UI thread.
  */
 class BitcoinCore: public QObject
@@ -580,15 +582,19 @@ int main(int argc, char *argv[])
     /// - Do not call GetDataDir(true) before this step finishes
     if (!boost::filesystem::is_directory(GetDataDir(false)))
     {
-        QMessageBox::critical(0, QObject::tr("Bitcoin Classic"),
+        // HFP0 REN begin
+        QMessageBox::critical(0, QObject::tr("Bitcoin HFP0"),
                               QObject::tr("Error: Specified data directory \"%1\" does not exist.").arg(QString::fromStdString(mapArgs["-datadir"])));
+        // HFP0 REN end
         return 1;
     }
     try {
         ReadConfigFile(mapArgs, mapMultiArgs);
     } catch (const std::exception& e) {
-        QMessageBox::critical(0, QObject::tr("Bitcoin Classic"),
+        // HFP0 REN begin
+        QMessageBox::critical(0, QObject::tr("Bitcoin HFP0"),
                               QObject::tr("Error: Cannot parse configuration file: %1. Only use key=value syntax.").arg(e.what()));
+        // HFP0 REN end
         return false;
     }
 
@@ -602,7 +608,9 @@ int main(int argc, char *argv[])
     try {
         SelectParams(ChainNameFromCommandLine());
     } catch(std::exception &e) {
-        QMessageBox::critical(0, QObject::tr("Bitcoin Classic"), QObject::tr("Error: %1").arg(e.what()));
+        // HFP0 REN begin
+        QMessageBox::critical(0, QObject::tr("Bitcoin HFP0"), QObject::tr("Error: %1").arg(e.what()));
+        // HFP0 REN end
         return 1;
     }
 #ifdef ENABLE_WALLET
@@ -662,7 +670,9 @@ int main(int argc, char *argv[])
         app.createWindow(networkStyle.data());
         app.requestInitialize();
 #if defined(Q_OS_WIN) && QT_VERSION >= 0x050000
-        WinShutdownMonitor::registerShutdownBlockReason(QObject::tr("Bitcoin Classic didn't yet exit safely..."), (HWND)app.getMainWinId());
+        // HFP0 REN begin
+        WinShutdownMonitor::registerShutdownBlockReason(QObject::tr("Bitcoin HFP0 didn't yet exit safely..."), (HWND)app.getMainWinId());
+        // HFP0 REN end
 #endif
         app.exec();
         app.requestShutdown();

@@ -13,7 +13,15 @@
  * for both bitcoind and bitcoin-classic, to make it harder for attackers to
  * target servers or GUI users specifically.
  */
-const std::string CLIENT_NAME("Classic");
+// HFP0 CLI begin
+#if HFP0_POW
+// HFP0 POW begin
+const std::string CLIENT_NAME("HFP0-scrypt");
+// HFP0 POW end
+#else
+const std::string CLIENT_NAME("HFP0-sha256");
+#endif
+// HFP0 CLI end
 
 /**
  * Client version number
@@ -91,8 +99,8 @@ std::string FormatFullVersion()
     return CLIENT_BUILD;
 }
 
-/** 
- * Format the subversion field according to BIP 14 spec (https://github.com/bitcoin/bips/blob/master/bip-0014.mediawiki) 
+/**
+ * Format the subversion field according to BIP 14 spec (https://github.com/bitcoin/bips/blob/master/bip-0014.mediawiki)
  */
 std::string FormatSubVersion(const std::string& name, int nClientVersion, const std::vector<std::string>& comments)
 {

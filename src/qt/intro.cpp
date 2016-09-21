@@ -191,8 +191,10 @@ void Intro::pickDataDirectory()
                 TryCreateDirectory(GUIUtil::qstringToBoostPath(dataDir));
                 break;
             } catch (const fs::filesystem_error&) {
-                QMessageBox::critical(0, tr("Bitcoin Classic"),
+                // HFP0 REN begin
+                QMessageBox::critical(0, tr("Bitcoin HFP0"),
                     tr("Error: Specified data directory \"%1\" cannot be created.").arg(dataDir));
+                // HFP0 REN end
                 /* fall through, back to choosing screen */
             }
         }

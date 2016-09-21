@@ -5,6 +5,8 @@
 
 # Base class for RPC testing
 
+# HFP0 TST: merged test_framework update from Classic v1.1.0
+
 # Add python-bitcoinrpc to module search path:
 import os
 import sys
@@ -26,7 +28,7 @@ from .util import (
     check_json_precision,
     initialize_chain_clean,
 )
-from authproxy import AuthServiceProxy, JSONRPCException
+from .authproxy import AuthServiceProxy, JSONRPCException
 
 
 class BitcoinTestFramework(object):
@@ -140,7 +142,7 @@ class BitcoinTestFramework(object):
             print("JSONRPC error: "+e.error['message'])
             traceback.print_tb(sys.exc_info()[2])
         except AssertionError as e:
-            print("Assertion failed: "+e.message)
+            print("Assertion failed: "+ str(e))
             traceback.print_tb(sys.exc_info()[2])
         except Exception as e:
             print("Unexpected exception caught during testing: "+str(e))

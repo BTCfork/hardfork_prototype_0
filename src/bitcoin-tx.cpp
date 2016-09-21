@@ -22,6 +22,16 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/assign/list_of.hpp>
 
+// HFP0 TODO: this tool will need to be adapted to support both
+// pre- and post-fork txs, if their signature schemes differ for replay
+// attack prevention.
+// It is also currently unaware of the dynamic blocksize (BSZ), but there
+// seems to be no real need for it to know anything about the dynamic
+// limits derived from BSZ.
+// As before, it uses the maximum allowed block size (ceiling) in MAX_BLOCK_SIZE,
+// and if a tx does not meet the BSZ derived criteria in force at the time, it
+// ought to be rejected by the Bitcoin consensus rules elsewhere.
+
 using namespace std;
 
 static bool fCreateBlank;
@@ -47,11 +57,13 @@ static bool AppInitRawTx(int argc, char* argv[])
     if (argc<2 || mapArgs.count("-?") || mapArgs.count("-h") || mapArgs.count("-help"))
     {
         // First part of help message is specific to this utility
-        std::string strUsage = _("Bitcoin Classic bitcoin-tx utility version") + " " + FormatFullVersion() + "\n\n" +
+        // HFP0 REN begin
+        std::string strUsage = _("Bitcoin HFP0 bitcoin-tx utility version") + " " + FormatFullVersion() + "\n\n" +
             _("Usage:") + "\n" +
               "  bitcoin-tx [options] <hex-tx> [commands]  " + _("Update hex-encoded bitcoin transaction") + "\n" +
               "  bitcoin-tx [options] -create [commands]   " + _("Create hex-encoded bitcoin transaction") + "\n" +
               "\n";
+        // HFP0 REN end
 
         fprintf(stdout, "%s", strUsage.c_str());
 

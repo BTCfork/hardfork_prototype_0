@@ -7,6 +7,56 @@
 #include "crypto/hmac_sha512.h"
 #include "pubkey.h"
 
+// HFP0 POW begin: safety
+#ifndef HFP0_POW
+#error HFP0_POW not defined!
+#endif
+// HFP0 POW end
+
+#if HFP0_POW
+// HFP0 POW begin: merge from satoshisbitcoin
+#include "sync.h"
+#include "utilstrencodings.h"
+#include "util.h"
+
+
+static void * V0 = NULL;
+
+
+uint256 HashModifiedScrypt(const CBlockHeader *obj)
+{
+        uint256 returnBuffer;
+
+        static CCriticalSection csHashModifiedScrypt;    // Only one block hash at a time due to avoid out-of-memory on lighter nodes
+        LOCK( csHashModifiedScrypt );
+
+        if( V0 == NULL ) {
+            LogPrintf("HashModifiedScrypt(): Allocating large memory region\n");
+            // Allocate buffer for scrypt to run if first run and not allocated
+            // Large memory requirement only allows for a single block hash to be performed at a time
+            V0 = malloc(128 * 1024 * 1024 + 63);
+#if HFP0_DEBUG_POW
+            // HFP0 DBG begin
+            LogPrintf("HFP0 POW: HashModifiedScrypt(): Allocated 128MB at %p\n", V0);
+            // HFP0 DBG end
+#endif
+
+            if( V0 == NULL ) {
+#if HFP0_DEBUG_POW
+                // HFP0 DBG begin
+                LogPrintf("HFP0 POW: Error in HashModifiedScrypt: Out of memory, cannot not allocate 128MB for modified scrypte hashing\n");
+                // HFP0 DBG end
+#endif
+                throw std::runtime_error("HashModifiedScrypt(): Out of memory");
+            }
+        }
+
+        crypto_1M_1_1_256_scrypt( (uint8_t *)(BEGIN(obj->nVersion)), 80, V0, (uint8_t *)(BEGIN(returnBuffer)), 32 );
+
+        return returnBuffer;
+}
+// HFP0 POW end
+#endif
 
 inline uint32_t ROTL32(uint32_t x, int8_t r)
 {

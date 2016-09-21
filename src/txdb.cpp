@@ -204,8 +204,14 @@ bool CBlockTreeDB::LoadBlockIndexGuts()
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nTx            = diskindex.nTx;
 
-                if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, Params().GetConsensus()))
+                // HFP0 FRK, DIF begin: replace consensusParams with computed active POW limit
+                uint256 activePowLimit = Params().GetConsensus().powLimitHistoric;
+                if ((pindexNew->nVersion & FULL_FORK_VERSION_MIN) >= FULL_FORK_VERSION_MIN) {
+                    activePowLimit = Params().GetConsensus().powLimitResetAtFork;
+                }
+                if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, activePowLimit))
                     return error("LoadBlockIndex(): CheckProofOfWork failed: %s", pindexNew->ToString());
+                // HFP0 FRK, DIF end
 
                 pcursor->Next();
             } else {

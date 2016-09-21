@@ -172,7 +172,9 @@ bool CBase58Data::SetString(const char* psz, unsigned int nVersionBytes)
     vchData.resize(vchTemp.size() - nVersionBytes);
     if (!vchData.empty())
         memcpy(&vchData[0], &vchTemp[nVersionBytes], vchData.size());
-    memory_cleanse(&vchTemp[0], vchData.size());
+    // HFP0 CRY begin: cleanse the full vector
+    memory_cleanse(&vchTemp[0], vchTemp.size());
+    // HFP0 CRY end
     return true;
 }
 

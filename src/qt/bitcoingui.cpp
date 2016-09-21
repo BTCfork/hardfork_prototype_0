@@ -115,7 +115,15 @@ BitcoinGUI::BitcoinGUI(const PlatformStyle *platformStyle, const NetworkStyle *n
 {
     GUIUtil::restoreWindowGeometry("nWindow", QSize(850, 550), this);
 
-    QString windowTitle = tr("Bitcoin Classic") + " - ";
+    // HFP0 REN begin
+#if HFP0_POW
+    // HFP0 POW begin
+    QString windowTitle = tr("Bitcoin HFP0-scrypt") + " - ";
+    // HFP0 POW end
+#else
+    QString windowTitle = tr("Bitcoin HFP0-sha256") + " - ";
+#endif
+    // HFP0 REN end
 #ifdef ENABLE_WALLET
     /* if compiled with wallet support, -disablewallet can still disable the wallet */
     enableWallet = !GetBoolArg("-disablewallet", false);
@@ -313,14 +321,18 @@ void BitcoinGUI::createActions()
     quitAction->setStatusTip(tr("Quit application"));
     quitAction->setShortcut(QKeySequence(Qt::CTRL + Qt::Key_Q));
     quitAction->setMenuRole(QAction::QuitRole);
-    aboutAction = new QAction(platformStyle->TextColorIcon(":/icons/about"), tr("&About Bitcoin Classic"), this);
-    aboutAction->setStatusTip(tr("Show information about Bitcoin Classic"));
+    // HFP0 REN begin
+    aboutAction = new QAction(platformStyle->TextColorIcon(":/icons/about"), tr("&About Bitcoin HFP0"), this);
+    aboutAction->setStatusTip(tr("Show information about Bitcoin HFP0"));
+    // HFP0 REN end
     aboutAction->setMenuRole(QAction::AboutRole);
     aboutQtAction = new QAction(platformStyle->TextColorIcon(":/icons/about_qt"), tr("About &Qt"), this);
     aboutQtAction->setStatusTip(tr("Show information about Qt"));
     aboutQtAction->setMenuRole(QAction::AboutQtRole);
     optionsAction = new QAction(platformStyle->TextColorIcon(":/icons/options"), tr("&Options..."), this);
-    optionsAction->setStatusTip(tr("Modify configuration options for Bitcoin Classic"));
+    // HFP0 REN begin
+    optionsAction->setStatusTip(tr("Modify configuration options for Bitcoin HFP0"));
+    // HFP0 REN end
     optionsAction->setMenuRole(QAction::PreferencesRole);
     toggleHideAction = new QAction(platformStyle->TextColorIcon(":/icons/about"), tr("&Show / Hide"), this);
     toggleHideAction->setStatusTip(tr("Show or hide the main Window"));
@@ -350,7 +362,9 @@ void BitcoinGUI::createActions()
 
     showHelpMessageAction = new QAction(platformStyle->TextColorIcon(":/icons/info"), tr("&Command-line options"), this);
     showHelpMessageAction->setMenuRole(QAction::NoRole);
-    showHelpMessageAction->setStatusTip(tr("Show the Bitcoin Classic help message to get a list with possible Bitcoin command-line options"));
+    // HFP0 REN begin
+    showHelpMessageAction->setStatusTip(tr("Show the Bitcoin HFP0 help message to get a list with possible Bitcoin command-line options"));
+    // HFP0 REN end
 
     connect(quitAction, SIGNAL(triggered()), qApp, SLOT(quit()));
     connect(aboutAction, SIGNAL(triggered()), this, SLOT(aboutClicked()));
@@ -528,7 +542,9 @@ void BitcoinGUI::createTrayIcon(const NetworkStyle *networkStyle)
 {
 #ifndef Q_OS_MAC
     trayIcon = new QSystemTrayIcon(this);
-    QString toolTip = tr("Bitcoin Classic client") + " " + networkStyle->getTitleAddText();
+    // HFP0 REN begin
+    QString toolTip = tr("Bitcoin HFP0 client") + " " + networkStyle->getTitleAddText();
+    // HFP0 REN end
     trayIcon->setToolTip(toolTip);
     trayIcon->setIcon(networkStyle->getTrayAndWindowIcon());
     trayIcon->show();

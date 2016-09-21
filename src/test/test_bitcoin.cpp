@@ -73,6 +73,15 @@ TestingSetup::TestingSetup(const std::string& chainName) : BasicTestingSetup(cha
         for (int i=0; i < nScriptCheckThreads-1; i++)
             threadGroup.create_thread(&ThreadScriptCheck);
         RegisterNodeSignals(GetNodeSignals());
+
+        // HFP0 TST, BSZ begin
+        // reset global variables which can otherwise carry over and cause
+        // tests which pass on their own, to fail after others.
+        maxBlockSize = OLD_MAX_BLOCK_SIZE;
+        maxBlockSigops = maxBlockSize / BLOCK_TO_SIGOPS_DIVISOR;
+        maxStandardTxSigops = maxBlockSigops / SIGOPS_TO_STANDARD_TX_DIVISOR;
+        median_block_lookback = NUM_BLOCKS_FOR_MEDIAN_BLOCK;
+        // HFP0 TST, BSZ end
 }
 
 TestingSetup::~TestingSetup()
@@ -128,10 +137,20 @@ TestChain100Setup::CreateAndProcessBlock(const std::vector<CMutableTransaction>&
     unsigned int extraNonce = 0;
     IncrementExtraNonce(&block, chainActive.Tip(), extraNonce);
 
-    while (!CheckProofOfWork(block.GetHash(), block.nBits, chainparams.GetConsensus())) ++block.nNonce;
+    // HFP0 FRK, DIF begin
+    // HFP0 TST, DIF TODO: set the POW limit correctly for the call below
+    // at the moment we've stubbed it using the historic POW limit, but it should
+    // tick over to powLimitResetAtFork when the height of the block reaches the trigger
+    while (!CheckProofOfWork(block.GetHash(), block.nBits, chainparams.GetConsensus().powLimitHistoric)) ++block.nNonce;
+    // HFP0 FRK, DIF end
 
     CValidationState state;
-    ProcessNewBlock(state, chainparams, NULL, &block, true, NULL);
+    // HFP0 TST begin: add trace to know when a block not accepted
+    // This is not always due to a test failure, sometimes it is expected behaviour,
+    // but the trace here helps to investigate potential problems.
+    if (!ProcessNewBlock(state, chainparams, NULL, &block, true, NULL))
+        printf("CreateAndProcessBlock: ProcessNewBlock, block not accepted\n");
+    // HFP0 TST end
 
     CBlock result = block;
     delete pblocktemplate;
@@ -149,8 +168,10 @@ CTxMemPoolEntry TestMemPoolEntryHelper::FromTx(CMutableTransaction &tx, CTxMemPo
     // Hack to assume either its completely dependent on other mempool txs or not at all
     CAmount inChainValue = hasNoDependencies ? txn.GetValueOut() : 0;
 
+    // HFP0 CSV (BIP112) begin: added lp
     return CTxMemPoolEntry(txn, nFee, nTime, dPriority, nHeight,
-                           hasNoDependencies, inChainValue, spendsCoinbase, sigOpCount);
+                           hasNoDependencies, inChainValue, spendsCoinbase, sigOpCount, lp);
+    // HFP0 CSV (BIP112) end
 }
 
 void Shutdown(void* parg)

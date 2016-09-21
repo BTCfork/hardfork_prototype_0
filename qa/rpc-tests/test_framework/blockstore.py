@@ -3,8 +3,11 @@
 #             and for constructing a getheaders message
 #
 
-from mininode import *
+# HFP0 TST: merged test_framework update from Classic v1.1.0
+
+from .mininode import *
 import dbm
+from io import BytesIO
 
 class BlockStore(object):
     def __init__(self, datadir):
@@ -21,7 +24,7 @@ class BlockStore(object):
             serialized_block = self.blockDB[repr(blockhash)]
         except KeyError:
             return None
-        f = cStringIO.StringIO(serialized_block)
+        f = BytesIO(serialized_block)
         ret = CBlock()
         ret.deserialize(f)
         ret.calc_sha256()
@@ -115,7 +118,7 @@ class TxStore(object):
             serialized_tx = self.txDB[repr(txhash)]
         except KeyError:
             return None
-        f = cStringIO.StringIO(serialized_tx)
+        f = BytesIO(serialized_tx)
         ret = CTransaction()
         ret.deserialize(f)
         ret.calc_sha256()
